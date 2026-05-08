@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.vacationbot.tray</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/jon/projects/vacation-bot/tray/run_tray.sh</string>
+    </array>
+
+    <!-- Run at login -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart if it crashes -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Needs a GUI session — this is a LaunchAgent, not a Daemon -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/jon/projects/vacation-bot/logs/tray.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/jon/projects/vacation-bot/logs/tray.log</string>
+
+    <!-- Small throttle to avoid instant restart loops -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+</dict>
+</plist>
