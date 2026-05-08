@@ -12,9 +12,12 @@ Runs as a **macOS LaunchDaemon** on a Mac Mini (`/Library/LaunchDaemons/com.vaca
 ~/projects/vacation-bot/
 ├── .env                          # secrets (never commit)
 ├── env.template                  # template for .env
+├── install_daemon.sh             # one-command LaunchDaemon install (substitutes paths)
+├── run_telegram.sh               # shell wrapper used by LaunchDaemon
 ├── telegram/
 │   └── bot.py                    # main entry point: BotManager + handlers + tray launch
 ├── shared/
+│   ├── paths.py                  # DATA_DIR + chat_dir() — shared data path helpers
 │   ├── claude_client.py          # Claude Haiku + tool-calling + conversation history
 │   ├── serpapi_client.py         # SerpApi wrappers: flights, hotels, rentals, places, etc.
 │   ├── web_fetcher.py            # URL extraction + content fetching
@@ -24,7 +27,7 @@ Runs as a **macOS LaunchDaemon** on a Mac Mini (`/Library/LaunchDaemons/com.vaca
 ├── tray/
 │   └── tray.py                   # macOS menu bar tray (rumps) — runs inside the bot process
 ├── launchd/
-│   └── com.vacationbot.telegram.plist   # LaunchDaemon config (copy to /Library/LaunchDaemons/)
+│   └── com.vacationbot.telegram.plist   # LaunchDaemon template (__PROJECT_DIR__, __USERNAME__ placeholders)
 ├── data/                         # Runtime data — gitignored
 │   └── {safe_chat_id}/
 │       ├── config.json                        # trip list + default trip
@@ -32,9 +35,8 @@ Runs as a **macOS LaunchDaemon** on a Mac Mini (`/Library/LaunchDaemons/com.vaca
 │       ├── {trip}_bookings.json               # confirmed bookings
 │       ├── {trip}_pending.json                # pending (unconfirmed email finds)
 │       └── scanned_email_ids.json             # dedup store for email scanner
-├── logs/                         # Runtime logs — gitignored
-│   └── telegram.log              # all log output (written by FileHandler in bot.py)
-└── run_telegram.sh               # Shell wrapper used by LaunchDaemon
+└── logs/                         # Runtime logs — gitignored
+    └── telegram.log              # all log output (written by FileHandler in bot.py)
 ```
 
 `chat_id` is stored as a "safe" string: negative group IDs have the `-` replaced with `neg` (e.g., `-1234` → `neg1234`).
@@ -88,15 +90,16 @@ All log output goes to `logs/telegram.log` via a `FileHandler` configured in `_s
 
 ### `telegram/bot.py`
 - `python-telegram-bot` 22.x with `asyncio` + `JobQueue`
-- `BotManager.start()` / `stop()` manage the bot thread lifecycle
+- `BotManager.start()` / `stop()` / `join()` manage the bot thread lifecycle
 - `_setup_handlers(app)` adds message handlers and schedules the daily email scan at 08:00
 - `handle_message` / `handle_edited_message` → `process_message` dispatches all `!claude` commands
 - `chunk_message` splits long replies at paragraph/sentence boundaries (Telegram 4096-char limit)
 - `_responded_ids` tracks which message IDs have been answered to prevent double-responses on edit
+- `_evict_message_texts()` / `_evict_responded_ids()` cap unbounded dicts (2000 messages, 500 IDs per chat)
 
 ### `shared/claude_client.py`
 - Model: `claude-haiku-4-5-20251001`
-- Agentic loop: keeps calling Claude until `stop_reason == "end_turn"` (handles multi-tool chains)
+- Agentic loop: keeps calling Claude until `stop_reason == "end_turn"`, capped at `MAX_TOOL_ITERATIONS = 10`
 - `MAX_HISTORY = 20` messages in RAM per trip; overflow triggers summarization to disk
 - System prompt rebuilt each call: base instructions + rolling summary + current bookings block
 - Booking tools: `add_booking`, `list_bookings`, `update_booking`, `remove_booking`
@@ -123,11 +126,10 @@ All log output goes to `logs/telegram.log` via a `FileHandler` configured in `_s
 
 The plist uses `KeepAlive.SuccessfulExit=false`: launchd restarts the bot only on non-zero exit (crash or Reload), not on clean exit (Quit or manual `launchctl stop`).
 
-**Deploy/update the plist on the Mac Mini:**
+The plist template in `launchd/` contains `__PROJECT_DIR__` and `__USERNAME__` placeholders. `install_daemon.sh` substitutes them and loads the daemon:
+
 ```bash
-sudo launchctl bootout system/com.vacationbot.telegram
-sudo cp launchd/com.vacationbot.telegram.plist /Library/LaunchDaemons/
-sudo launchctl bootstrap system /Library/LaunchDaemons/com.vacationbot.telegram.plist
+./install_daemon.sh
 ```
 
 **Useful launchctl commands:**
@@ -184,4 +186,3 @@ Python 3.11+ required (uses `list[int]`, `int | None` type hints).
 1. **Bot token rotation** — token was exposed in chat logs; revoke via BotFather (`/mybots` → API Token → Revoke) and update `.env`
 2. **`ALLOWED_CHAT_ID` not set** — daily email scan will silently skip; set to the Telegram group chat ID
 3. **Email scanning not tested end-to-end** — set `GMAIL_ADDRESS` and `GMAIL_APP_PASSWORD` in `.env` to enable
-4. **Plist not yet deployed** — the updated plist (with `KeepAlive.SuccessfulExit=false`) needs to be copied to `/Library/LaunchDaemons/` on the Mac Mini and reloaded

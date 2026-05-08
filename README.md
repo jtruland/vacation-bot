@@ -52,7 +52,7 @@ https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates
 ## Running Manually (development / testing)
 
 ```bash
-cd ~/projects/vacation-bot
+cd vacation-bot
 source venv/bin/activate
 python3 telegram/bot.py
 ```
@@ -147,3 +147,27 @@ All output is written to `logs/telegram.log` (created automatically). View it li
 ```bash
 tail -f logs/telegram.log
 ```
+
+---
+
+## Bot Commands
+
+Type `!claude help` in the Telegram group for the full reference. Quick overview:
+
+| Command | Description |
+|---------|-------------|
+| `!claude trip new <name>` | Create a trip |
+| `!claude trips` | List all trips |
+| `!claude trip default <name>` | Set default trip |
+| `!claude <question>` | Ask Claude (searches live data as needed) |
+| `!claude #tripname <question>` | Ask about a specific trip |
+| `!claude booked` | Show confirmed bookings |
+| `!claude scan email` | Scan Gmail for booking confirmations |
+| `!claude book save all` | Save all found bookings |
+| `!claude book skip` | Discard found bookings without saving |
+| `!claude reset` | Clear in-memory conversation history |
+| `!claude summarize` | Save a planning summary to disk |
+| `!claude flights JFK Rome 2026-07-15 2026-07-25 2` | Direct flight search |
+| `!claude hotels Rome 2026-07-15 2026-07-22 2` | Direct hotel search |
+| `!claude places best trattorias in Trastevere` | Place search |
+| `!claude events Florence 2026-07-20` | Local events |
