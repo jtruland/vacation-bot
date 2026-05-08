@@ -1,10 +1,13 @@
+import asyncio
+import datetime
+import logging
 import os
 import sys
-import logging
+import threading
+
 from telegram import Update
-from telegram.ext import Application, MessageHandler, filters, ContextTypes
-import datetime
 from telegram.constants import ParseMode
+from telegram.ext import Application, ContextTypes, MessageHandler, filters
 from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -27,13 +30,35 @@ from shared.bookings import add_booking as _add_booking
 
 load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
 
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+# ─── Logging ───────────────────────────────────────────────────────────────────
+
+PROJECT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+LOG_DIR  = os.path.join(PROJECT_DIR, 'logs')
+LOG_FILE = os.path.join(LOG_DIR, 'telegram.log')
+
+
+def _setup_logging() -> None:
+    os.makedirs(LOG_DIR, exist_ok=True)
+    fmt = logging.Formatter('%(asctime)s  %(name)s  %(levelname)s  %(message)s')
+
+    fh = logging.FileHandler(LOG_FILE)
+    fh.setFormatter(fmt)
+
+    sh = logging.StreamHandler()
+    sh.setFormatter(fmt)
+
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.addHandler(fh)
+    root.addHandler(sh)
+
+
+_setup_logging()
 logger = logging.getLogger(__name__)
 
-TRIGGER_WORD = os.getenv("TRIGGER_WORD", "!claude")
+# ─── Config ────────────────────────────────────────────────────────────────────
+
+TRIGGER_WORD   = os.getenv("TRIGGER_WORD", "!claude")
 ALLOWED_CHAT_ID = os.getenv("ALLOWED_CHAT_ID")
 
 # Tracks original text for every message we've seen, keyed by (chat_id, message_id)
@@ -84,81 +109,60 @@ HELP_TEXT = (
     "_Dates: YYYY-MM-DD or MM/DD/YYYY. Prices in USD._"
 )
 
+# ─── Message helpers ────────────────────────────────────────────────────────────
 
 def chunk_message(text: str, max_length: int = 4000) -> list[str]:
-    """Split a long message into chunks at natural boundaries (paragraphs, sentences)."""
     if len(text) <= max_length:
         return [text]
-
     chunks = []
     while text:
         if len(text) <= max_length:
             chunks.append(text)
             break
-
-        # Try to split at a paragraph break first
         split_at = text.rfind('\n\n', 0, max_length)
         if split_at == -1:
-            # Fall back to a line break
             split_at = text.rfind('\n', 0, max_length)
         if split_at == -1:
-            # Fall back to end of sentence
             split_at = text.rfind('. ', 0, max_length)
             if split_at != -1:
-                split_at += 1  # Include the period
+                split_at += 1
         if split_at == -1:
-            # Hard cut at max_length
             split_at = max_length
-
         chunks.append(text[:split_at].strip())
         text = text[split_at:].strip()
-
     return chunks
 
 
 async def send_chunked(message, text: str, parse_mode: str = "Markdown") -> None:
-    """Send a response, splitting into multiple messages if it exceeds Telegram's limit."""
     chunks = chunk_message(text)
     for i, chunk in enumerate(chunks):
         try:
             await message.reply_text(chunk, parse_mode=parse_mode)
         except Exception:
-            # If Markdown parsing fails on a chunk, send as plain text
             try:
                 await message.reply_text(chunk)
             except Exception as e:
-                logger.error(f"Failed to send chunk {i + 1}/{len(chunks)}: {e}")
+                logger.error("Failed to send chunk %d/%d: %s", i + 1, len(chunks), e)
 
 
 async def is_admin(message, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Check if the message sender is a group admin or creator."""
     try:
-        member = await context.bot.get_chat_member(
-            message.chat_id,
-            message.from_user.id
-        )
+        member = await context.bot.get_chat_member(message.chat_id, message.from_user.id)
         return member.status in ("administrator", "creator")
     except Exception:
         return False
 
+# ─── Handlers ──────────────────────────────────────────────────────────────────
 
 async def process_message(message, context: ContextTypes.DEFAULT_TYPE, text: str, is_edit: bool = False) -> None:
-    """Core message processing logic shared by new and edited message handlers."""
     chat_id = str(message.chat_id)
-
     body = strip_trigger(text)
     lower = body.lower()
 
-    # -----------------------------------------------------------------------
-    # !claude help
-    # -----------------------------------------------------------------------
     if lower == "help" or body == "":
         await message.reply_text(HELP_TEXT, parse_mode="Markdown")
         return
 
-    # -----------------------------------------------------------------------
-    # First-time setup: no trips exist yet
-    # -----------------------------------------------------------------------
     if not has_trips(chat_id) and not lower.startswith("trip new"):
         await message.reply_text(
             "👋 Welcome! No trip plans exist yet.\n\n"
@@ -170,9 +174,6 @@ async def process_message(message, context: ContextTypes.DEFAULT_TYPE, text: str
         )
         return
 
-    # -----------------------------------------------------------------------
-    # !claude trips
-    # -----------------------------------------------------------------------
     if lower == "trips":
         trips = get_trips(chat_id)
         default = get_default_trip(chat_id)
@@ -183,17 +184,13 @@ async def process_message(message, context: ContextTypes.DEFAULT_TYPE, text: str
             await message.reply_text("🗺️ *Trip plans:*\n" + "\n".join(lines), parse_mode="Markdown")
         return
 
-    # -----------------------------------------------------------------------
-    # !claude trip new <name>
-    # -----------------------------------------------------------------------
     if lower.startswith("trip new "):
         name = body[len("trip new "):].strip()
         success, result = create_trip(chat_id, name)
         if success:
             default = get_default_trip(chat_id)
-            is_default = default == result
             msg = f'✅ Trip "*{result}*" created!'
-            if is_default:
+            if default == result:
                 msg += " It's been set as the default."
             msg += f"\n\nStart planning: `!claude <question>` or `!claude #{result} <question>`"
             await message.reply_text(msg, parse_mode="Markdown")
@@ -201,9 +198,6 @@ async def process_message(message, context: ContextTypes.DEFAULT_TYPE, text: str
             await message.reply_text(f"❌ {result}")
         return
 
-    # -----------------------------------------------------------------------
-    # !claude trip default <name>
-    # -----------------------------------------------------------------------
     if lower.startswith("trip default "):
         name = body[len("trip default "):].strip()
         success, result = set_default_trip(chat_id, name)
@@ -213,9 +207,6 @@ async def process_message(message, context: ContextTypes.DEFAULT_TYPE, text: str
             await message.reply_text(f"❌ {result}")
         return
 
-    # -----------------------------------------------------------------------
-    # !claude trip delete <name>  (admin only)
-    # -----------------------------------------------------------------------
     if lower.startswith("trip delete "):
         if not await is_admin(message, context):
             await message.reply_text("❌ Only group admins can delete trips.")
@@ -234,9 +225,6 @@ async def process_message(message, context: ContextTypes.DEFAULT_TYPE, text: str
             await message.reply_text(f"❌ {result}")
         return
 
-    # -----------------------------------------------------------------------
-    # !claude reset [#tripname]
-    # -----------------------------------------------------------------------
     if lower == "reset" or lower.startswith("reset "):
         remainder = body[len("reset"):].strip()
         trip_selector, _ = parse_trip_selector(remainder)
@@ -255,9 +243,6 @@ async def process_message(message, context: ContextTypes.DEFAULT_TYPE, text: str
         )
         return
 
-    # -----------------------------------------------------------------------
-    # !claude summarize [#tripname]
-    # -----------------------------------------------------------------------
     if lower == "summarize" or lower.startswith("summarize "):
         remainder = body[len("summarize"):].strip()
         trip_selector, _ = parse_trip_selector(remainder)
@@ -272,25 +257,16 @@ async def process_message(message, context: ContextTypes.DEFAULT_TYPE, text: str
             await message.reply_text("Nothing to summarize yet — ask me something first!")
         return
 
-    # -----------------------------------------------------------------------
-    # !claude booked [#tripname]
-    # -----------------------------------------------------------------------
     if lower == "booked" or lower.startswith("booked "):
         remainder = body[len("booked"):].strip()
         trip_selector, _ = parse_trip_selector(remainder)
         trip_name = trip_selector or get_default_trip(chat_id)
         if not trip_name:
-            await message.reply_text(
-                "No default trip set. Use `!claude trips` to see your trips.",
-                parse_mode="Markdown"
-            )
+            await message.reply_text("No default trip set. Use `!claude trips` to see your trips.", parse_mode="Markdown")
             return
         await send_chunked(message, _format_bookings_telegram(chat_id, trip_name))
         return
 
-    # -----------------------------------------------------------------------
-    # !claude scan email [#tripname]
-    # -----------------------------------------------------------------------
     if lower == "scan email" or lower.startswith("scan email "):
         remainder = body[len("scan email"):].strip()
         trip_selector, _ = parse_trip_selector(remainder)
@@ -302,9 +278,7 @@ async def process_message(message, context: ContextTypes.DEFAULT_TYPE, text: str
             await message.reply_text(f'❌ No trip called "{trip_name}" found.', parse_mode="Markdown")
             return
         await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
-        await message.reply_text(
-            f"📬 Scanning your email for *{trip_name}* bookings…", parse_mode="Markdown"
-        )
+        await message.reply_text(f"📬 Scanning your email for *{trip_name}* bookings…", parse_mode="Markdown")
         try:
             candidates = scan_for_bookings(chat_id, trip_name)
         except RuntimeError as e:
@@ -320,9 +294,6 @@ async def process_message(message, context: ContextTypes.DEFAULT_TYPE, text: str
         await send_chunked(message, format_pending_for_telegram(chat_id, trip_name))
         return
 
-    # -----------------------------------------------------------------------
-    # !claude book save [all | 1 2 3 …] [#tripname]
-    # -----------------------------------------------------------------------
     if lower.startswith("book save"):
         args_str = body[len("book save"):].strip()
         trip_selector, args_str = parse_trip_selector(args_str)
@@ -331,10 +302,7 @@ async def process_message(message, context: ContextTypes.DEFAULT_TYPE, text: str
             await message.reply_text("No default trip set.", parse_mode="Markdown")
             return
         if not has_pending(chat_id, trip_name):
-            await message.reply_text(
-                "No pending bookings to save. Run `!claude scan email` first.",
-                parse_mode="Markdown"
-            )
+            await message.reply_text("No pending bookings to save. Run `!claude scan email` first.", parse_mode="Markdown")
             return
         pending = get_pending(chat_id, trip_name)
         if args_str.lower() == "all" or not args_str:
@@ -343,10 +311,7 @@ async def process_message(message, context: ContextTypes.DEFAULT_TYPE, text: str
             try:
                 indices = [int(n) for n in args_str.split()]
             except ValueError:
-                await message.reply_text(
-                    "❌ Use `!claude book save all` or `!claude book save 1 3`.",
-                    parse_mode="Markdown"
-                )
+                await message.reply_text("❌ Use `!claude book save all` or `!claude book save 1 3`.", parse_mode="Markdown")
                 return
             to_save = pick_pending(chat_id, trip_name, indices)
         if not to_save:
@@ -369,9 +334,6 @@ async def process_message(message, context: ContextTypes.DEFAULT_TYPE, text: str
         await send_chunked(message, "\n".join(lines))
         return
 
-    # -----------------------------------------------------------------------
-    # !claude book skip [#tripname]
-    # -----------------------------------------------------------------------
     if lower == "book skip" or lower.startswith("book skip "):
         remainder = body[len("book skip"):].strip()
         trip_selector, _ = parse_trip_selector(remainder)
@@ -390,9 +352,6 @@ async def process_message(message, context: ContextTypes.DEFAULT_TYPE, text: str
         await message.reply_text("🗑️ Pending bookings discarded. They won't appear in future scans.")
         return
 
-    # -----------------------------------------------------------------------
-    # Search commands — all use typing indicator and SerpApi
-    # -----------------------------------------------------------------------
     search_commands = {
         "flights":  search_flights,
         "hotels":   search_hotels,
@@ -409,15 +368,12 @@ async def process_message(message, context: ContextTypes.DEFAULT_TYPE, text: str
             try:
                 result = fn(args)
             except Exception as e:
-                logger.error(f"Search error ({cmd}): {e}")
+                logger.error("Search error (%s): %s", cmd, e)
                 await message.reply_text(f"❌ Search failed: {e}")
                 return
             await send_chunked(message, result)
             return
 
-    # -----------------------------------------------------------------------
-    # !claude [#tripname] <question>
-    # -----------------------------------------------------------------------
     trip_selector, question = parse_trip_selector(body)
     trip_name = trip_selector or get_default_trip(chat_id)
 
@@ -443,16 +399,15 @@ async def process_message(message, context: ContextTypes.DEFAULT_TYPE, text: str
         return
 
     await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
-
     try:
         response = ask_claude(question, chat_id, trip_name)
         header = f"_{trip_name}_\n" if trip_selector else ""
         await send_chunked(message, header + response)
     except RuntimeError as e:
-        logger.error(f"Claude API error: {e}")
+        logger.error("Claude API error: %s", e)
         await message.reply_text(f"❌ Claude error: {e}")
     except Exception as e:
-        logger.error(f"Unexpected error: {e}")
+        logger.error("Unexpected error: %s", e)
         await message.reply_text(f"⚠️ Unexpected error: {e}")
 
 
@@ -462,28 +417,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     if ALLOWED_CHAT_ID and str(message.chat_id) != ALLOWED_CHAT_ID:
-        logger.warning(f"Ignored message from unauthorized chat_id: {message.chat_id}")
+        logger.warning("Ignored message from unauthorized chat_id: %s", message.chat_id)
         return
 
     text = message.text.strip()
     chat_id = str(message.chat_id)
     message_id = message.message_id
 
-    # Store original text so we can compare if the message is later edited
     _message_texts[(chat_id, message_id)] = text
 
     if not text.lower().startswith(TRIGGER_WORD.lower()):
         return
 
-    # Mark this message as responded
     if chat_id not in _responded_ids:
         _responded_ids[chat_id] = set()
     _responded_ids[chat_id].add(message_id)
 
-    # Send immediate acknowledgment so the group knows Claude is working
     body = strip_trigger(text).strip()
     lower = body.lower()
-    # Skip acknowledgment for instant commands (help, trips, reset, summarize, trip management)
     instant_commands = {"help", "trips", "reset", "summarize", "booked", "book skip"}
     is_instant = (
         body == ""
@@ -519,12 +470,10 @@ async def handle_edited_message(update: Update, context: ContextTypes.DEFAULT_TY
     original_had_trigger = original_text.lower().startswith(TRIGGER_WORD.lower())
     already_responded = message_id in _responded_ids.get(chat_id, set())
 
-    # Update stored text
     _message_texts[(chat_id, message_id)] = text
 
-    # Case 1: !claude was added via edit — treat as a new message
     if new_has_trigger and not original_had_trigger:
-        logger.info(f"Trigger added via edit on message {message_id} — treating as new.")
+        logger.info("Trigger added via edit on message %d — treating as new.", message_id)
         if chat_id not in _responded_ids:
             _responded_ids[chat_id] = set()
         _responded_ids[chat_id].add(message_id)
@@ -532,29 +481,17 @@ async def handle_edited_message(update: Update, context: ContextTypes.DEFAULT_TY
         await process_message(message, context, text, is_edit=True)
         return
 
-    # Case 2: Had trigger before edit, still has trigger — check if question changed
     if new_has_trigger and original_had_trigger and already_responded:
         new_body = strip_trigger(text).strip()
         old_body = strip_trigger(original_text).strip()
-
-        # Ignore trivial edits (punctuation, capitalisation, whitespace)
-        new_normalized = " ".join(new_body.lower().split())
-        old_normalized = " ".join(old_body.lower().split())
-
-        if new_normalized == old_normalized:
-            logger.info(f"Trivial edit on message {message_id} — ignoring.")
+        if " ".join(new_body.lower().split()) == " ".join(old_body.lower().split()):
+            logger.info("Trivial edit on message %d — ignoring.", message_id)
             return
-
-        # Substantive change — re-process with a note
-        logger.info(f"Substantive edit on message {message_id}: '{old_body}' → '{new_body}'")
-        await message.reply_text(
-            f"📝 _(Message edited — responding to updated question)_",
-            parse_mode="Markdown"
-        )
+        logger.info("Substantive edit on message %d: '%s' → '%s'", message_id, old_body, new_body)
+        await message.reply_text("📝 _(Message edited — responding to updated question)_", parse_mode="Markdown")
         await process_message(message, context, text, is_edit=True)
         return
 
-    # Case 3: New text has trigger but we haven't responded before (shouldn't normally happen)
     if new_has_trigger and not already_responded:
         if chat_id not in _responded_ids:
             _responded_ids[chat_id] = set()
@@ -562,76 +499,142 @@ async def handle_edited_message(update: Update, context: ContextTypes.DEFAULT_TY
         await process_message(message, context, text, is_edit=True)
         return
 
-    # All other cases: no trigger, or trigger removed — ignore silently
-    logger.info(f"Edit on message {message_id} ignored (no actionable change).")
+    logger.info("Edit on message %d ignored (no actionable change).", message_id)
 
 
 async def _daily_email_scan(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Background job: scan email for every known trip and notify the group
-    if new booking confirmations are found.  Runs at 08:00 daily via JobQueue.
-    """
     if not ALLOWED_CHAT_ID:
         logger.warning("ALLOWED_CHAT_ID not set — skipping daily email scan")
         return
-
     chat_id = ALLOWED_CHAT_ID
-    trips   = get_trips(chat_id)
+    trips = get_trips(chat_id)
     if not trips:
         return
-
     for trip_name in trips:
         try:
             candidates = scan_for_bookings(chat_id, trip_name)
         except Exception as e:
             logger.error("Daily email scan failed for %s: %s", trip_name, e)
             continue
-
         if not candidates:
             logger.info("Daily scan: no new bookings for %s", trip_name)
             continue
-
         set_pending(chat_id, trip_name, candidates)
-        header = (
-            f"📬 *Daily booking scan — {len(candidates)} new item(s) found for {trip_name}!*\n\n"
-        )
+        header = f"📬 *Daily booking scan — {len(candidates)} new item(s) found for {trip_name}!*\n\n"
         text = header + format_pending_for_telegram(chat_id, trip_name)
         for chunk in chunk_message(text):
             try:
                 await context.bot.send_message(
-                    chat_id=int(chat_id),
-                    text=chunk,
-                    parse_mode=ParseMode.MARKDOWN,
+                    chat_id=int(chat_id), text=chunk, parse_mode=ParseMode.MARKDOWN
                 )
             except Exception as e:
                 logger.error("Failed to send daily scan results: %s", e)
 
 
-def main():
+def _setup_handlers(app: Application) -> None:
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE & filters.TEXT, handle_edited_message))
+    app.job_queue.run_daily(_daily_email_scan, time=datetime.time(hour=8, minute=0))
+    logger.info("Daily email scan scheduled at 08:00")
+
+# ─── Bot manager ───────────────────────────────────────────────────────────────
+
+class BotManager:
+    """Runs the Telegram bot in a background thread; supports start/stop from the tray."""
+
+    def __init__(self, token: str) -> None:
+        self._token = token
+        self._thread: threading.Thread | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._stop_event: asyncio.Event | None = None
+        self._lock = threading.Lock()
+        self._status = "stopped"
+
+    @property
+    def status(self) -> str:
+        with self._lock:
+            return self._status
+
+    def start(self) -> bool:
+        with self._lock:
+            if self._thread and self._thread.is_alive():
+                return False
+            self._status = "starting"
+            self._thread = threading.Thread(target=self._run, name="bot", daemon=True)
+            self._thread.start()
+        return True
+
+    def stop(self) -> None:
+        with self._lock:
+            if not (self._thread and self._thread.is_alive()):
+                self._status = "stopped"
+                return
+            self._status = "stopping"
+            loop, ev = self._loop, self._stop_event
+        if loop and ev:
+            loop.call_soon_threadsafe(ev.set)
+        if self._thread:
+            self._thread.join(timeout=15)
+        with self._lock:
+            if self._status == "stopping":
+                self._status = "stopped"
+
+    def _run(self) -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        ev = asyncio.Event()
+        with self._lock:
+            self._loop = loop
+            self._stop_event = ev
+        try:
+            loop.run_until_complete(self._async_main(ev))
+        except Exception:
+            logger.exception("Bot thread crashed")
+            with self._lock:
+                self._status = "error"
+        finally:
+            loop.close()
+            with self._lock:
+                self._loop = None
+                self._stop_event = None
+                if self._status == "stopping":
+                    self._status = "stopped"
+
+    async def _async_main(self, stop_event: asyncio.Event) -> None:
+        app = Application.builder().token(self._token).build()
+        _setup_handlers(app)
+        async with app:
+            await app.start()
+            await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+            with self._lock:
+                self._status = "running"
+            logger.info("Telegram vacation bot is running")
+            await stop_event.wait()
+            await app.updater.stop()
+            await app.stop()
+        logger.info("Telegram bot stopped")
+        with self._lock:
+            if self._status == "stopping":
+                self._status = "stopped"
+
+# ─── Entry point ───────────────────────────────────────────────────────────────
+
+def main() -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         raise ValueError("TELEGRAM_BOT_TOKEN is not set in .env")
 
-    app = Application.builder().token(token).build()
+    bot = BotManager(token)
+    bot.start()
 
-    # Handle new messages
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    # Handle edited messages
-    app.add_handler(MessageHandler(
-        filters.UpdateType.EDITED_MESSAGE & filters.TEXT,
-        handle_edited_message
-    ))
-
-    # Daily email scan at 08:00 via built-in JobQueue (no extra dependencies)
-    app.job_queue.run_daily(
-        _daily_email_scan,
-        time=datetime.time(hour=8, minute=0),
-    )
-    logger.info("Daily email scan scheduled at 08:00")
-
-    logger.info("Telegram vacation bot is running...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    try:
+        from tray.tray import VacationBotTray
+        logger.info("Starting tray app")
+        VacationBotTray(bot).run()
+    except ImportError:
+        logger.info("rumps not available — running without tray (headless mode)")
+        assert bot._thread is not None
+        bot._thread.join()
 
 
 if __name__ == "__main__":

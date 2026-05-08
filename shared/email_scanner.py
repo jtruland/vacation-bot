@@ -21,8 +21,11 @@ import re
 from datetime import datetime, timedelta
 from email.header import decode_header as _decode_header
 
+import logging
 import anthropic
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
 
@@ -33,14 +36,14 @@ SCAN_WINDOW = int(os.getenv("EMAIL_SCAN_DAYS", "90"))   # days back to search
 
 # Gmail search terms — broad enough to catch airlines, hotels, OTAs, rental cos
 GMAIL_QUERY = (
-    '(subject:"booking confirmation" OR subject:"reservation confirmation" '
-    'OR subject:"your booking" OR subject:"your reservation" '
-    'OR subject:"itinerary" OR subject:"e-ticket" OR subject:"eticket" '
-    'OR subject:"your flight" OR subject:"flight confirmation" '
-    'OR subject:"hotel confirmation" OR subject:"check-in information" '
-    'OR subject:"rental confirmation" OR subject:"car rental" '
-    'OR subject:"tour confirmation" OR subject:"activity confirmation" '
-    'OR subject:"restaurant reservation")'
+    '(subject:(booking confirmation) OR subject:(reservation confirmation) '
+    'OR subject:(your booking) OR subject:(your reservation) '
+    'OR subject:itinerary OR subject:e-ticket OR subject:eticket '
+    'OR subject:(your flight) OR subject:(flight confirmation) '
+    'OR subject:(hotel confirmation) OR subject:(check-in information) '
+    'OR subject:(rental confirmation) OR subject:(car rental) '
+    'OR subject:(tour confirmation) OR subject:(activity confirmation) '
+    'OR subject:(restaurant reservation))'
 )
 
 # ─── Seen-IDs store ────────────────────────────────────────────────────────────
@@ -157,7 +160,7 @@ def fetch_booking_emails(chat_id: str, since_days: int = SCAN_WINDOW) -> list[di
     Each dict: {msg_id, subject, sender, date, body}
     """
     seen = _load_seen(chat_id)
-    since_date = (datetime.now() - timedelta(days=since_days)).strftime("%d-%b-%Y")
+    since_date = (datetime.now() - timedelta(days=since_days)).strftime("%Y/%m/%d")
 
     mail = _connect_gmail()
     try:
@@ -318,6 +321,6 @@ def scan_for_bookings(chat_id: str, trip_name: str, since_days: int = SCAN_WINDO
                 candidates.append(booking)
         except Exception as e:
             # Log and continue — one bad email shouldn't abort the whole scan
-            print(f"[email_scanner] Error processing email '{em.get('subject')}': {e}")
+            logger.error("Error processing email '%s': %s", em.get('subject'), e)
 
     return candidates

@@ -21,9 +21,12 @@
     <key>RunAtLoad</key>
     <true/>
 
-    <!-- Restart automatically if it crashes -->
+    <!-- Restart automatically if it crashes (but not on clean stop) -->
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
 
     <!-- Logs -->
     <key>StandardOutPath</key>
