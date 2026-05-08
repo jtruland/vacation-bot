@@ -63,7 +63,6 @@ def _load_seen(chat_id: str) -> set[str]:
 
 
 def _save_seen(chat_id: str, seen: set[str]) -> None:
-    os.makedirs(DATA_DIR, exist_ok=True)
     with open(_seen_path(chat_id), "w") as f:
         json.dump({"ids": list(seen)}, f, indent=2)
 
