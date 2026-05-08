@@ -63,9 +63,25 @@ ALLOWED_CHAT_ID = os.getenv("ALLOWED_CHAT_ID")
 
 # Tracks original text for every message we've seen, keyed by (chat_id, message_id)
 _message_texts: dict[tuple[str, int], str] = {}
+_MAX_TRACKED_MESSAGES = 2000
 
 # Tracks which message IDs we've already responded to, keyed by chat_id
 _responded_ids: dict[str, set[int]] = {}
+_MAX_RESPONDED_PER_CHAT = 500
+
+
+def _evict_message_texts() -> None:
+    if len(_message_texts) > _MAX_TRACKED_MESSAGES:
+        excess = len(_message_texts) - _MAX_TRACKED_MESSAGES
+        for key in list(_message_texts)[:excess]:
+            _message_texts.pop(key, None)
+
+
+def _evict_responded_ids(chat_id: str) -> None:
+    ids = _responded_ids.get(chat_id)
+    if ids and len(ids) > _MAX_RESPONDED_PER_CHAT:
+        to_remove = sorted(ids)[:len(ids) - _MAX_RESPONDED_PER_CHAT]
+        ids.difference_update(to_remove)
 
 HELP_TEXT = (
     "🗺️ *Vacation Planning Bot*\n\n"
@@ -425,6 +441,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     message_id = message.message_id
 
     _message_texts[(chat_id, message_id)] = text
+    _evict_message_texts()
 
     if not text.lower().startswith(TRIGGER_WORD.lower()):
         return
@@ -432,6 +449,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if chat_id not in _responded_ids:
         _responded_ids[chat_id] = set()
     _responded_ids[chat_id].add(message_id)
+    _evict_responded_ids(chat_id)
 
     body = strip_trigger(text).strip()
     lower = body.lower()
@@ -564,6 +582,10 @@ class BotManager:
             self._thread.start()
         return True
 
+    def join(self) -> None:
+        if self._thread:
+            self._thread.join()
+
     def stop(self) -> None:
         with self._lock:
             if not (self._thread and self._thread.is_alive()):
@@ -633,8 +655,7 @@ def main() -> None:
         VacationBotTray(bot).run()
     except ImportError:
         logger.info("rumps not available — running without tray (headless mode)")
-        assert bot._thread is not None
-        bot._thread.join()
+        bot.join()
 
 
 if __name__ == "__main__":

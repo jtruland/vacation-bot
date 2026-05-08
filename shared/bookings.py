@@ -11,7 +11,7 @@ import os
 import uuid
 from datetime import datetime
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), '..', 'data')
+from shared.paths import chat_dir
 
 # ─── Type metadata ─────────────────────────────────────────────────────────────
 
@@ -29,7 +29,7 @@ BOOKING_ORDER = {"flight": 0, "hotel": 1, "rental": 2, "activity": 3}
 # ─── Storage helpers ───────────────────────────────────────────────────────────
 
 def _path(chat_id: str, trip_name: str) -> str:
-    return os.path.join(DATA_DIR, f"{chat_id}_{trip_name}_bookings.json")
+    return os.path.join(chat_dir(chat_id), f"{trip_name}_bookings.json")
 
 
 def _load(chat_id: str, trip_name: str) -> list[dict]:
@@ -44,7 +44,6 @@ def _load(chat_id: str, trip_name: str) -> list[dict]:
 
 
 def _save(chat_id: str, trip_name: str, bookings: list[dict]) -> None:
-    os.makedirs(DATA_DIR, exist_ok=True)
     with open(_path(chat_id, trip_name), "w") as f:
         json.dump({"bookings": bookings}, f, indent=2)
 

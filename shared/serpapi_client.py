@@ -430,15 +430,17 @@ def search_events(args: str) -> str:
             title = e.get("title", "Unknown Event")
             date = e.get("date", {})
             date_str = date.get("when", "")
-            venue = e.get("venue", {}).get("name", "")
-            address = e.get("venue", {}).get("rating", "")
+            venue_info = e.get("venue", {})
+            venue = venue_info.get("name", "")
+            address = venue_info.get("address", "")
             description = e.get("description", "")[:120]
 
             venue_str = f"\n   📍 {venue}" if venue else ""
+            addr_str = f"\n   🗺 {address}" if address and not venue else ""
             date_display = f"\n   🗓 {date_str}" if date_str else ""
             desc_str = f"\n   {description}..." if description else ""
 
-            lines.append(f"{i}. *{title}*{date_display}{venue_str}{desc_str}")
+            lines.append(f"{i}. *{title}*{date_display}{venue_str}{addr_str}{desc_str}")
 
         lines.append("\n_Events from Google. Verify details before attending._")
         return "\n".join(lines)

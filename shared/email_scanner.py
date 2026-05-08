@@ -24,12 +24,11 @@ from email.header import decode_header as _decode_header
 import logging
 import anthropic
 from dotenv import load_dotenv
+from shared.paths import chat_dir
 
 logger = logging.getLogger(__name__)
 
 load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
-
-DATA_DIR    = os.path.join(os.path.dirname(__file__), '..', 'data')
 IMAP_HOST   = "imap.gmail.com"
 IMAP_PORT   = 993
 SCAN_WINDOW = int(os.getenv("EMAIL_SCAN_DAYS", "90"))   # days back to search
@@ -49,7 +48,7 @@ GMAIL_QUERY = (
 # ─── Seen-IDs store ────────────────────────────────────────────────────────────
 
 def _seen_path(chat_id: str) -> str:
-    return os.path.join(DATA_DIR, f"{chat_id}_scanned_email_ids.json")
+    return os.path.join(chat_dir(chat_id), "scanned_email_ids.json")
 
 
 def _load_seen(chat_id: str) -> set[str]:

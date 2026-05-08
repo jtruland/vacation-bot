@@ -10,11 +10,11 @@ import json
 import os
 from datetime import datetime
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), '..', 'data')
+from shared.paths import chat_dir
 
 
 def _path(chat_id: str, trip_name: str) -> str:
-    return os.path.join(DATA_DIR, f"{chat_id}_{trip_name}_pending.json")
+    return os.path.join(chat_dir(chat_id), f"{trip_name}_pending.json")
 
 
 def _load(chat_id: str, trip_name: str) -> list[dict]:
@@ -29,7 +29,6 @@ def _load(chat_id: str, trip_name: str) -> list[dict]:
 
 
 def _save(chat_id: str, trip_name: str, items: list[dict]) -> None:
-    os.makedirs(DATA_DIR, exist_ok=True)
     with open(_path(chat_id, trip_name), "w") as f:
         json.dump({"pending": items, "updated_at": datetime.now().isoformat()}, f, indent=2)
 

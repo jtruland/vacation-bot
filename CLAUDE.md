@@ -172,7 +172,7 @@ pgrep -f "telegram/bot.py" | wc -l                   # should be 1
 
 ```bash
 pip install "python-telegram-bot[job-queue]"
-pip install anthropic python-dotenv requests serpapi rumps
+pip install anthropic python-dotenv requests beautifulsoup4 serpapi rumps
 ```
 
 Python 3.11+ required (uses `list[int]`, `int | None` type hints).

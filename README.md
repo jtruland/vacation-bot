@@ -22,7 +22,7 @@ git clone https://github.com/jtruland/vacation-bot.git
 cd vacation-bot
 python3 -m venv venv
 source venv/bin/activate
-pip install "python-telegram-bot[job-queue]" anthropic python-dotenv requests serpapi rumps
+pip install "python-telegram-bot[job-queue]" anthropic python-dotenv requests beautifulsoup4 serpapi rumps
 ```
 
 ### 2. Configure environment variables

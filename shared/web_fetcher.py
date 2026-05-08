@@ -13,12 +13,13 @@ HEADERS = {
     )
 }
 
-URL_PATTERN = re.compile(r'https?://[^\s]+')
+_URL_PATTERN = re.compile(r'https?://[^\s]+')
+_TRAILING_PUNCT = re.compile(r'[.,;:!?)\]>"\']+$')
 
 
 def extract_urls(text: str) -> list[str]:
-    """Find all URLs in a message."""
-    return URL_PATTERN.findall(text)
+    """Find all URLs in a message, stripping trailing punctuation."""
+    return [_TRAILING_PUNCT.sub('', m) for m in _URL_PATTERN.findall(text)]
 
 
 def fetch_url(url: str, timeout: int = 8) -> tuple[bool, str]:

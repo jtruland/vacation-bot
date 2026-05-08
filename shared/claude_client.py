@@ -1,9 +1,11 @@
+import logging
 import os
 import json
 import anthropic
 from anthropic import Anthropic
 from datetime import datetime
 from dotenv import load_dotenv
+from shared.paths import chat_dir
 from shared.web_fetcher import extract_urls, build_url_context
 from shared.serpapi_client import (
     search_flights, search_hotels, search_rentals,
@@ -19,11 +21,23 @@ from shared.bookings import (
 
 load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
 
-client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-TRIGGER_WORD = os.getenv("TRIGGER_WORD", "!claude")
+logger = logging.getLogger(__name__)
 
+TRIGGER_WORD = os.getenv("TRIGGER_WORD", "!claude")
 MAX_HISTORY = 20          # Max messages in active memory per trip (10 exchanges)
-DATA_DIR = os.path.join(os.path.dirname(__file__), '..', 'data')
+MAX_TOOL_ITERATIONS = 10  # Max tool-call rounds per Claude response
+
+_client: Anthropic | None = None
+
+
+def _get_client() -> Anthropic:
+    global _client
+    if _client is None:
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise RuntimeError("ANTHROPIC_API_KEY is not set in .env")
+        _client = Anthropic(api_key=api_key)
+    return _client
 
 BASE_SYSTEM_PROMPT = (
     "You are a helpful vacation planning assistant embedded in a family group chat. "
@@ -365,19 +379,12 @@ def _execute_tool(name: str, tool_input: dict, chat_id: str = "", trip_name: str
 # Path helpers
 # ---------------------------------------------------------------------------
 
-def _chat_dir(chat_id: str) -> str:
-    safe = str(chat_id).replace("-", "neg")
-    path = os.path.join(DATA_DIR, safe)
-    os.makedirs(path, exist_ok=True)
-    return path
-
-
 def _config_path(chat_id: str) -> str:
-    return os.path.join(_chat_dir(chat_id), "config.json")
+    return os.path.join(chat_dir(chat_id), "config.json")
 
 
 def _summary_path(chat_id: str, trip_name: str) -> str:
-    return os.path.join(_chat_dir(chat_id), f"{trip_name}_summary.txt")
+    return os.path.join(chat_dir(chat_id), f"{trip_name}_summary.txt")
 
 
 # ---------------------------------------------------------------------------
@@ -490,7 +497,7 @@ def _generate_and_save_summary(chat_id: str, trip_name: str) -> None:
     if not history:
         return
     try:
-        response = client.messages.create(
+        response = _get_client().messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=512,
             system=SUMMARIZE_PROMPT,
@@ -498,7 +505,7 @@ def _generate_and_save_summary(chat_id: str, trip_name: str) -> None:
         )
         _append_summary(chat_id, trip_name, response.content[0].text.strip())
     except Exception:
-        pass  # Don't interrupt the user experience if summarization fails
+        logger.exception("Failed to save summary for %s/%s — history will still be trimmed", chat_id, trip_name)
 
 
 def save_summarize_now(chat_id: str, trip_name: str | None = None) -> tuple[bool, str]:
@@ -566,8 +573,8 @@ def ask_claude(message: str, chat_id: str, trip_name: str) -> str:
 
     try:
         # Agentic loop — Claude may call tools multiple times before giving a final answer
-        while True:
-            response = client.messages.create(
+        for _iteration in range(MAX_TOOL_ITERATIONS):
+            response = _get_client().messages.create(
                 model="claude-haiku-4-5-20251001",
                 max_tokens=2048,
                 system=_build_system_prompt(chat_id, trip_name),
@@ -581,16 +588,13 @@ def ask_claude(message: str, chat_id: str, trip_name: str) -> str:
                     (block.text for block in response.content
                      if hasattr(block, "text")), ""
                 )
-                # Store the final assistant turn in history
                 history.append({"role": "assistant", "content": response.content})
                 return reply
 
             # Claude wants to use one or more tools
             if response.stop_reason == "tool_use":
-                # Add Claude's response (with tool_use blocks) to history
                 history.append({"role": "assistant", "content": response.content})
 
-                # Execute each tool call and collect results
                 tool_results = []
                 for block in response.content:
                     if block.type == "tool_use":
@@ -604,9 +608,7 @@ def ask_claude(message: str, chat_id: str, trip_name: str) -> str:
                             "content": result,
                         })
 
-                # Feed tool results back to Claude as a user turn
                 history.append({"role": "user", "content": tool_results})
-                # Loop continues — Claude will now synthesize the results
 
             else:
                 # Unexpected stop reason — return whatever text we have
@@ -616,6 +618,10 @@ def ask_claude(message: str, chat_id: str, trip_name: str) -> str:
                 )
                 history.append({"role": "assistant", "content": response.content})
                 return reply
+
+        # Exhausted iteration limit
+        logger.warning("Tool iteration limit (%d) reached for %s/%s", MAX_TOOL_ITERATIONS, chat_id, trip_name)
+        return "⚠️ I got a bit stuck working through that. Could you try rephrasing your question?"
 
     except anthropic.AuthenticationError:
         history.pop()
@@ -654,9 +660,8 @@ def clear_history(chat_id: str, trip_name: str) -> None:
 
 def strip_trigger(message: str) -> str:
     """Remove the trigger word from the start of a message."""
-    trigger = os.getenv("TRIGGER_WORD", "!claude")
-    if message.lower().startswith(trigger.lower()):
-        return message[len(trigger):].strip()
+    if message.lower().startswith(TRIGGER_WORD.lower()):
+        return message[len(TRIGGER_WORD):].strip()
     return message.strip()
 
 
