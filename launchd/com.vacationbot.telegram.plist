@@ -6,16 +6,16 @@
     <string>com.vacationbot.telegram</string>
 
     <key>UserName</key>
-    <string>jon</string>
+    <string>__USERNAME__</string>
 
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/jon/projects/vacation-bot/run_telegram.sh</string>
+        <string>__PROJECT_DIR__/run_telegram.sh</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/jon/projects/vacation-bot</string>
+    <string>__PROJECT_DIR__</string>
 
     <!-- Start automatically at boot -->
     <key>RunAtLoad</key>
@@ -28,10 +28,10 @@
         <false/>
     </dict>
 
-    <!-- Logs -->
+    <!-- Logs (fallback — bot also writes to logs/telegram.log via FileHandler) -->
     <key>StandardOutPath</key>
-    <string>/Users/jon/projects/vacation-bot/logs/telegram.log</string>
+    <string>__PROJECT_DIR__/logs/telegram.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/jon/projects/vacation-bot/logs/telegram.error.log</string>
+    <string>__PROJECT_DIR__/logs/telegram.error.log</string>
 </dict>
 </plist>
