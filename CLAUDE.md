@@ -181,8 +181,13 @@ Python 3.11+ required (uses `list[int]`, `int | None` type hints).
 
 ---
 
+## `.env` formatting
+
+Each variable must be on its own line. A missing newline between two keys causes silent misreads — e.g. `TRIGGER_WORD=!claudeGMAIL_ADDRESS=foo` makes the bot ignore all messages (wrong trigger word) and breaks email scanning (`GMAIL_ADDRESS` never set). If the bot stops responding, check this first.
+
+---
+
 ## Known Issues / Pending
 
 1. **Bot token rotation** — token was exposed in chat logs; revoke via BotFather (`/mybots` → API Token → Revoke) and update `.env`
 2. **`ALLOWED_CHAT_ID` not set** — daily email scan will silently skip; set to the Telegram group chat ID
-3. **Email scanning not tested end-to-end** — set `GMAIL_ADDRESS` and `GMAIL_APP_PASSWORD` in `.env` to enable

@@ -42,6 +42,8 @@ GMAIL_ADDRESS=...             # optional — for email scanning
 GMAIL_APP_PASSWORD=...        # 16-char app password from myaccount.google.com/apppasswords
 ```
 
+> **Important:** each key must be on its own line with no trailing content. A missing newline between two keys causes both to be silently misread — the most common symptom is the bot not responding to any messages because `TRIGGER_WORD` loaded incorrectly.
+
 To find your group chat ID, add the bot to the group, send a message, then check:
 ```
 https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates
@@ -171,3 +173,26 @@ Type `!claude help` in the Telegram group for the full reference. Quick overview
 | `!claude hotels Rome 2026-07-15 2026-07-22 2` | Direct hotel search |
 | `!claude places best trattorias in Trastevere` | Place search |
 | `!claude events Florence 2026-07-20` | Local events |
+
+---
+
+## Troubleshooting
+
+**Bot doesn't respond to any messages**
+Check that `TRIGGER_WORD` is on its own line in `.env` with no other content appended. If the line is malformed (e.g. `TRIGGER_WORD=!claudeGMAIL_ADDRESS=...`), the bot loads the wrong trigger word and silently ignores everything.
+
+**Email scanning fails with "GMAIL_ADDRESS must be set"**
+Same root cause — if `GMAIL_ADDRESS` is concatenated onto the end of another variable it will never be loaded. Verify each key is on its own line.
+
+**Bot responds in development but not under launchd**
+Ensure the daemon is loading `.env` from the correct path. Check `logs/telegram.log` for startup errors:
+```bash
+tail -20 logs/telegram.log
+```
+
+**409 Conflict error in logs**
+Another bot process is already polling. Check for duplicate processes:
+```bash
+pgrep -fl "telegram/bot.py"
+```
+Kill any extras, then restart via the tray or `launchctl`.
