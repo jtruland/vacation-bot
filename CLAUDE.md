@@ -2,7 +2,7 @@
 
 A Claude-powered Telegram bot for a family group chat. Members ask about flights, hotels, rentals, activities, and the bot responds with live search data via SerpApi. It stores confirmed bookings per trip and can scan Gmail for booking confirmation emails.
 
-Runs as a **macOS LaunchDaemon** on a Mac Mini (`/Library/LaunchDaemons/com.vacationbot.telegram.plist`). A **rumps tray app** (`tray/bot_tray.py`) provides Start/Stop/Restart controls and status monitoring from the menu bar.
+Runs as a **macOS LaunchDaemon** on a Mac Mini (`/Library/LaunchDaemons/com.vacationbot.telegram.plist`). The tray icon and menu are integrated directly into the bot process (`tray/tray.py`) — there is no separate tray launcher.
 
 ---
 
@@ -11,17 +11,18 @@ Runs as a **macOS LaunchDaemon** on a Mac Mini (`/Library/LaunchDaemons/com.vaca
 ```
 ~/projects/vacation-bot/
 ├── .env                          # secrets (never commit)
+├── env.template                  # template for .env
 ├── telegram/
-│   └── bot.py                    # Telegram bot — main entry point
+│   └── bot.py                    # main entry point: BotManager + handlers + tray launch
 ├── shared/
 │   ├── claude_client.py          # Claude Haiku + tool-calling + conversation history
 │   ├── serpapi_client.py         # SerpApi wrappers: flights, hotels, rentals, places, etc.
 │   ├── web_fetcher.py            # URL extraction + content fetching
 │   ├── bookings.py               # Persistent booking CRUD (per chat_id + trip_name)
 │   ├── pending_bookings.py       # Temporary store for email-found bookings awaiting confirm
-│   └── email_scanner.py         # Gmail IMAP + Claude Haiku extraction pipeline
+│   └── email_scanner.py          # Gmail IMAP + Claude Haiku extraction pipeline
 ├── tray/
-│   └── bot_tray.py               # macOS menu bar tray (rumps)
+│   └── tray.py                   # macOS menu bar tray (rumps) — runs inside the bot process
 ├── launchd/
 │   └── com.vacationbot.telegram.plist   # LaunchDaemon config (copy to /Library/LaunchDaemons/)
 ├── data/                         # Runtime data — gitignored
@@ -32,9 +33,7 @@ Runs as a **macOS LaunchDaemon** on a Mac Mini (`/Library/LaunchDaemons/com.vaca
 │       ├── {trip}_pending.json                # pending (unconfirmed email finds)
 │       └── scanned_email_ids.json             # dedup store for email scanner
 ├── logs/                         # Runtime logs — gitignored
-│   ├── telegram.log
-│   ├── telegram.error.log
-│   └── tray.log
+│   └── telegram.log              # all log output (written by FileHandler in bot.py)
 └── run_telegram.sh               # Shell wrapper used by LaunchDaemon
 ```
 
@@ -49,13 +48,39 @@ TELEGRAM_BOT_TOKEN=...        # from BotFather
 ANTHROPIC_API_KEY=...         # claude-haiku-4-5-20251001
 SERPAPI_KEY=...               # SerpApi
 TRIGGER_WORD=!claude          # default
-ALLOWED_CHAT_ID=              # optional — restricts bot to one group chat ID
+ALLOWED_CHAT_ID=              # optional — restricts bot to one group chat ID; required for daily email scan
 GMAIL_ADDRESS=...             # for email scanning
-GMAIL_APP_PASSWORD=...        # 16-char Google app password
+GMAIL_APP_PASSWORD=...        # 16-char Google app password (not login password)
 EMAIL_SCAN_DAYS=90            # how far back to search (default 90)
 ```
 
-**Important**: The bot token was exposed in conversation logs and should be regenerated via BotFather (`/mybots` → API Token → Revoke).
+---
+
+## Architecture
+
+### Process model
+
+`telegram/bot.py` is the single entry point. `main()`:
+1. Creates a `BotManager` and calls `start()` — this runs the Telegram async polling loop in a background thread
+2. Imports and runs `VacationBotTray` from `tray/tray.py` on the main thread (required by macOS AppKit)
+3. If `rumps` is not installed, falls back to headless mode (bot thread runs until killed)
+
+`BotManager` owns the asyncio event loop in its thread. The tray signals it via `loop.call_soon_threadsafe(stop_event.set)` for clean shutdown.
+
+### Tray controls
+
+| Action | Behaviour |
+|--------|-----------|
+| **Start Bot** | Starts a new bot thread (available when stopped/crashed) |
+| **Stop Bot** | Signals the async loop to stop gracefully; tray stays up |
+| **Reload** | Stops bot cleanly, then `os._exit(1)` → launchd restarts the process (picks up code changes) |
+| **Quit** | Stops bot cleanly, then `os._exit(0)` → launchd does NOT restart |
+
+Reload works because `KeepAlive.SuccessfulExit=false` in the plist means launchd only restarts on non-zero exit.
+
+### Logging
+
+All log output goes to `logs/telegram.log` via a `FileHandler` configured in `_setup_logging()` at the top of `bot.py`. A `StreamHandler` (stderr) is also added as a fallback. All `shared/` modules use standard `logging` — no `print()` statements.
 
 ---
 
@@ -63,21 +88,18 @@ EMAIL_SCAN_DAYS=90            # how far back to search (default 90)
 
 ### `telegram/bot.py`
 - `python-telegram-bot` 22.x with `asyncio` + `JobQueue`
-- Install: `pip install "python-telegram-bot[job-queue]"`
-- `handle_message` / `handle_edited_message` → `process_message`
-- `process_message` dispatches all `!claude` commands
-- `_daily_email_scan` runs at 08:00 via `app.job_queue.run_daily()`
-- `ALLOWED_CHAT_ID` must be set for the daily scan to know which chat to notify
+- `BotManager.start()` / `stop()` manage the bot thread lifecycle
+- `_setup_handlers(app)` adds message handlers and schedules the daily email scan at 08:00
+- `handle_message` / `handle_edited_message` → `process_message` dispatches all `!claude` commands
 - `chunk_message` splits long replies at paragraph/sentence boundaries (Telegram 4096-char limit)
-- Edited message support: re-runs if question changed, ignores trivial whitespace/punctuation edits
 - `_responded_ids` tracks which message IDs have been answered to prevent double-responses on edit
 
 ### `shared/claude_client.py`
 - Model: `claude-haiku-4-5-20251001`
 - Agentic loop: keeps calling Claude until `stop_reason == "end_turn"` (handles multi-tool chains)
 - `MAX_HISTORY = 20` messages in RAM per trip; overflow triggers summarization to disk
-- System prompt is rebuilt each call: base instructions + rolling summary + current bookings block
-- Booking tools injected into every call: `add_booking`, `list_bookings`, `update_booking`, `remove_booking`
+- System prompt rebuilt each call: base instructions + rolling summary + current bookings block
+- Booking tools: `add_booking`, `list_bookings`, `update_booking`, `remove_booking`
 - Search tools: `search_flights`, `search_hotels`, `search_rentals`, `search_places`, `search_reviews`, `search_events`, `search_explore`
 - URL content is prepended to the user message when URLs are detected (`web_fetcher.py`)
 
@@ -89,64 +111,32 @@ EMAIL_SCAN_DAYS=90            # how far back to search (default 90)
 - Booking types: `flight`, `hotel`, `rental`, `activity`
 
 ### `shared/email_scanner.py`
-- Gmail IMAP with `X-GM-RAW` search for full Gmail query syntax
-- `GMAIL_QUERY` searches broad set of booking-related subject keywords
+- Gmail IMAP with `X-GM-RAW` for full Gmail search syntax
+- `after:` date uses Gmail format (`YYYY/MM/DD`); subject terms use parentheses not inner quotes
 - Each email → Claude Haiku → structured JSON (or `{"is_booking": false}`)
-- Returns only unseen emails (tracked by `scanned_email_ids.json`)
+- Unseen emails tracked in `scanned_email_ids.json` to prevent reprocessing
 - `scan_for_bookings(chat_id, trip_name)` is the main entry point
-
-### `tray/bot_tray.py`
-- Status detection: `pgrep -f telegram/bot.py` + `ps -o ppid=` to distinguish daemon (ppid=1) vs orphan processes
-- Three states: 🟢 daemon running, 🟠 orphan (started outside daemon), 🔴 stopped
-- Start/Restart: `sudo launchctl kickstart [-k] system/com.vacationbot.telegram`
-- Stop: `sudo launchctl stop com.vacationbot.telegram`
-- Kill orphan: `kill -9 {pid}` (no sudo needed — process is owned by user)
-- Requires visudo entry: `jon ALL=(ALL) NOPASSWD: /bin/launchctl`
-- Install: `pip install rumps`
 
 ---
 
 ## LaunchDaemon
 
-**Current issue**: `KeepAlive` is set to `<true/>` in the plist, which means `launchctl stop` immediately restarts the process. This causes 409 Conflict errors if a CLI instance of the bot is also running.
+The plist uses `KeepAlive.SuccessfulExit=false`: launchd restarts the bot only on non-zero exit (crash or Reload), not on clean exit (Quit or manual `launchctl stop`).
 
-**Fix needed** — change in `/Library/LaunchDaemons/com.vacationbot.telegram.plist`:
-```xml
-<!-- Replace <key>KeepAlive</key><true/> with: -->
-<key>KeepAlive</key>
-<dict>
-    <key>SuccessfulExit</key>
-    <false/>
-</dict>
+**Deploy/update the plist on the Mac Mini:**
+```bash
+sudo launchctl bootout system/com.vacationbot.telegram
+sudo cp launchd/com.vacationbot.telegram.plist /Library/LaunchDaemons/
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.vacationbot.telegram.plist
 ```
-
-After editing: `sudo launchctl bootout system/com.vacationbot.telegram && sudo launchctl bootstrap system /Library/LaunchDaemons/com.vacationbot.telegram.plist`
 
 **Useful launchctl commands:**
 ```bash
-# Status
-sudo launchctl list com.vacationbot.telegram
-
-# Start (if loaded but stopped)
-sudo launchctl kickstart system/com.vacationbot.telegram
-
-# Restart (kill + restart atomically)
-sudo launchctl kickstart -k system/com.vacationbot.telegram
-
-# Stop (works correctly AFTER KeepAlive fix above)
-sudo launchctl stop com.vacationbot.telegram
-
-# Full unload (removes from launchd entirely)
-sudo launchctl bootout system/com.vacationbot.telegram
-
-# Full reload
-sudo launchctl bootstrap system /Library/LaunchDaemons/com.vacationbot.telegram.plist
-
-# Check for multiple instances (should be 1)
-pgrep -f "telegram/bot.py" | wc -l
-
-# Nuclear wipe of all instances
-sudo launchctl bootout system/com.vacationbot.telegram 2>/dev/null; sudo pkill -9 -f "telegram/bot.py"
+sudo launchctl list com.vacationbot.telegram          # status + last exit code
+sudo launchctl kickstart system/com.vacationbot.telegram   # start
+sudo launchctl kickstart -k system/com.vacationbot.telegram  # restart
+sudo launchctl stop com.vacationbot.telegram          # stop (no restart)
+pgrep -f "telegram/bot.py" | wc -l                   # should be 1
 ```
 
 ---
@@ -178,28 +168,20 @@ sudo launchctl bootout system/com.vacationbot.telegram 2>/dev/null; sudo pkill -
 
 ---
 
-## Known Issues / Pending
-
-1. **KeepAlive plist fix** (see above) — not yet applied to the deployed plist on the Mac Mini
-2. **Bot token rotation** — token was exposed in chat logs, needs to be revoked via BotFather and updated in `.env`
-3. **`ALLOWED_CHAT_ID` not set** — daily email scan will silently skip; set this to the Telegram group chat ID
-4. **Email scanning not tested end-to-end** — `GMAIL_ADDRESS` and `GMAIL_APP_PASSWORD` need to be set in `.env`
-5. **Patch files** (`bot_booked_patch.py`, `bot_email_patch.py`, `claude_client_bookings_patch.py`) — these are stale diffs from mid-session, can be deleted; the patches are already applied to the main files
-
----
-
 ## Dependencies
 
 ```bash
-# Core
 pip install "python-telegram-bot[job-queue]"
-pip install anthropic python-dotenv requests
-
-# Tray
-pip install rumps
-
-# All flags for system Python on macOS
-pip install --break-system-packages <package>
+pip install anthropic python-dotenv requests serpapi rumps
 ```
 
 Python 3.11+ required (uses `list[int]`, `int | None` type hints).
+
+---
+
+## Known Issues / Pending
+
+1. **Bot token rotation** — token was exposed in chat logs; revoke via BotFather (`/mybots` → API Token → Revoke) and update `.env`
+2. **`ALLOWED_CHAT_ID` not set** — daily email scan will silently skip; set to the Telegram group chat ID
+3. **Email scanning not tested end-to-end** — set `GMAIL_ADDRESS` and `GMAIL_APP_PASSWORD` in `.env` to enable
+4. **Plist not yet deployed** — the updated plist (with `KeepAlive.SuccessfulExit=false`) needs to be copied to `/Library/LaunchDaemons/` on the Mac Mini and reloaded
