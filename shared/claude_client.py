@@ -654,6 +654,12 @@ def clear_history(chat_id: str, trip_name: str) -> None:
         _histories[chat_id][trip_name] = []
 
 
+def rehome_history(old_chat_id: str, new_chat_id: str) -> None:
+    """Re-key in-memory histories when a group migrates to a supergroup."""
+    if old_chat_id in _histories:
+        _histories[new_chat_id] = _histories.pop(old_chat_id)
+
+
 # ---------------------------------------------------------------------------
 # Message parsing
 # ---------------------------------------------------------------------------

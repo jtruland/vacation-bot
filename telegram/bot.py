@@ -7,12 +7,14 @@ import threading
 
 from telegram import Update
 from telegram.constants import ParseMode
-from telegram.ext import Application, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    Application, ChatMemberHandler, ContextTypes, MessageHandler, filters,
+)
 from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from shared.claude_client import (
-    ask_claude, clear_history, save_summarize_now, strip_trigger,
+    ask_claude, clear_history, rehome_history, save_summarize_now, strip_trigger,
     parse_trip_selector, get_trips, get_default_trip, has_trips,
     create_trip, set_default_trip, delete_trip
 )
@@ -27,6 +29,14 @@ from shared.pending_bookings import (
     pick_pending, format_pending_for_telegram,
 )
 from shared.bookings import add_booking as _add_booking
+import shared.admin_config as admin_config
+from shared.dm_router import (
+    AmbiguousTripError,
+    generate_dm_code, disable_dm_code,
+    link_dm_to_group, unlink_dm_from_group, get_linked_groups,
+    get_group_for_code, resolve_dm_trip,
+    log_dm_activity, pop_dm_activity,
+)
 
 load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
 
@@ -58,8 +68,8 @@ logger = logging.getLogger(__name__)
 
 # ─── Config ────────────────────────────────────────────────────────────────────
 
-TRIGGER_WORD   = os.getenv("TRIGGER_WORD", "!claude")
-ALLOWED_CHAT_ID = os.getenv("ALLOWED_CHAT_ID")
+TRIGGER_WORD = os.getenv("TRIGGER_WORD", "!claude")
+BOT_OWNER_ID = os.getenv("BOT_OWNER_ID", "")
 
 # Tracks original text for every message we've seen, keyed by (chat_id, message_id)
 _message_texts: dict[tuple[str, int], str] = {}
@@ -170,10 +180,199 @@ async def is_admin(message, context: ContextTypes.DEFAULT_TYPE) -> bool:
 
 # ─── Handlers ──────────────────────────────────────────────────────────────────
 
-async def process_message(message, context: ContextTypes.DEFAULT_TYPE, text: str, is_edit: bool = False) -> None:
+async def process_message(message, context: ContextTypes.DEFAULT_TYPE, text: str, is_edit: bool = False, is_dm: bool = False) -> None:
     chat_id = str(message.chat_id)
+    sender_id = str(message.from_user.id) if message.from_user else ""
     body = strip_trigger(text)
     lower = body.lower()
+
+    # ── DM handling ─────────────────────────────────────────────────────────────
+    if is_dm:
+        return await _handle_dm(message, context, body, lower, chat_id, sender_id)
+
+    # ── DM activity summary (group only) ────────────────────────────────────────
+    pending_dm = pop_dm_activity(chat_id)
+    if pending_dm:
+        summary = "📱 *Recent DM activity:*\n" + "\n".join(f"  • {e}" for e in pending_dm)
+        try:
+            await message.reply_text(summary, parse_mode="Markdown")
+        except Exception:
+            pass
+
+    await _process_group_message(message, context, body, lower, chat_id, forced_trip=None)
+
+
+async def _handle_dm(message, context, body: str, lower: str, dm_chat_id: str, sender_id: str) -> None:
+    """Dispatch DM-specific commands and route trip queries to the linked group."""
+    is_owner = BOT_OWNER_ID and sender_id == BOT_OWNER_ID
+
+    # ── Owner admin commands ─────────────────────────────────────────────────────
+    if is_owner and lower.startswith("admin "):
+        args = body[len("admin "):].strip()
+        args_lower = args.lower()
+
+        if args_lower == "list":
+            allowed = admin_config.get_allowed()
+            pending = admin_config.get_pending()
+            lines = ["*Allowed chats:*"]
+            for cid in allowed:
+                lines.append(f"  `{cid}`")
+            if pending:
+                lines.append("\n*Pending approval:*")
+                for cid, info in pending.items():
+                    lines.append(f"  `{cid}` — {info.get('name', '?')}")
+            await message.reply_text("\n".join(lines) or "No chats configured.", parse_mode="Markdown")
+            return
+
+        if args_lower.startswith("allow "):
+            cid = args[len("allow "):].strip()
+            admin_config.allow_chat(cid)
+            await message.reply_text(f"✅ `{cid}` is now allowed.", parse_mode="Markdown")
+            try:
+                await context.bot.send_message(
+                    chat_id=int(cid),
+                    text="👋 This group has been approved. Type `!claude help` to get started.",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+            except Exception as e:
+                logger.warning("Could not send welcome to %s: %s", cid, e)
+            return
+
+        if args_lower.startswith("deny "):
+            cid = args[len("deny "):].strip()
+            admin_config.deny_chat(cid)
+            await message.reply_text(f"🚫 `{cid}` denied and removed from pending.", parse_mode="Markdown")
+            return
+
+        if args_lower.startswith("revoke "):
+            cid = args[len("revoke "):].strip()
+            admin_config.revoke_chat(cid)
+            try:
+                await context.bot.leave_chat(int(cid))
+            except Exception:
+                pass
+            await message.reply_text(f"🗑️ `{cid}` revoked. Bot left the group.", parse_mode="Markdown")
+            return
+
+        if args_lower.startswith("rehome "):
+            parts = args[len("rehome "):].strip().split()
+            if len(parts) == 2:
+                old_cid, new_cid = parts
+                admin_config.rehome_chat(old_cid, new_cid)
+                rehome_history(old_cid, new_cid)
+                await message.reply_text(f"✅ Rehomed `{old_cid}` → `{new_cid}`.", parse_mode="Markdown")
+            else:
+                await message.reply_text("Usage: `!claude admin rehome <old_id> <new_id>`", parse_mode="Markdown")
+            return
+
+        await message.reply_text(
+            "Admin commands:\n"
+            "`!claude admin list`\n"
+            "`!claude admin allow <chat_id>`\n"
+            "`!claude admin deny <chat_id>`\n"
+            "`!claude admin revoke <chat_id>`\n"
+            "`!claude admin rehome <old_id> <new_id>`",
+            parse_mode="Markdown"
+        )
+        return
+
+    # ── DM join/link commands ────────────────────────────────────────────────────
+    if lower.startswith("join "):
+        code = body[len("join "):].strip()
+        group_id = get_group_for_code(code)
+        if not group_id:
+            await message.reply_text("❌ Invalid or expired join code.")
+            return
+        link_dm_to_group(dm_chat_id, group_id)
+        try:
+            chat = await context.bot.get_chat(int(group_id))
+            group_name = chat.title or group_id
+        except Exception:
+            group_name = group_id
+        await message.reply_text(
+            f"✅ Linked to *{group_name}*. Use `!claude #tripname <question>` to work on a trip.",
+            parse_mode="Markdown"
+        )
+        return
+
+    if lower == "dm linked":
+        linked = get_linked_groups(dm_chat_id)
+        if not linked:
+            await message.reply_text("No groups linked. Use `!claude join <code>` to link one.", parse_mode="Markdown")
+            return
+        lines = ["*Linked groups:*"]
+        for gid in linked:
+            trips = get_trips(gid)
+            trip_list = ", ".join(f"`{t}`" for t in trips) if trips else "_no trips_"
+            lines.append(f"  `{gid}` — trips: {trip_list}")
+        await message.reply_text("\n".join(lines), parse_mode="Markdown")
+        return
+
+    if lower.startswith("dm unlink"):
+        linked = get_linked_groups(dm_chat_id)
+        if not linked:
+            await message.reply_text("No groups linked.")
+            return
+        if len(linked) == 1:
+            unlink_dm_from_group(dm_chat_id, linked[0])
+            await message.reply_text(f"✅ Unlinked from `{linked[0]}`.", parse_mode="Markdown")
+        else:
+            args = body[len("dm unlink"):].strip()
+            if not args:
+                lines = ["Multiple groups linked. Specify which to unlink:"]
+                for gid in linked:
+                    lines.append(f"  `!claude dm unlink {gid}`")
+                await message.reply_text("\n".join(lines), parse_mode="Markdown")
+            else:
+                if unlink_dm_from_group(dm_chat_id, args):
+                    await message.reply_text(f"✅ Unlinked from `{args}`.", parse_mode="Markdown")
+                else:
+                    await message.reply_text(f"❌ Not linked to `{args}`.", parse_mode="Markdown")
+        return
+
+    # ── Route to linked group trip ───────────────────────────────────────────────
+    trip_selector, question = parse_trip_selector(body)
+    try:
+        resolved = resolve_dm_trip(dm_chat_id, trip_selector)
+    except AmbiguousTripError as e:
+        lines = [f"❌ Trip `{e.trip_name}` exists in multiple linked groups. Specify the group:"]
+        for gid in e.group_ids:
+            lines.append(f"  — `{gid}`")
+        await message.reply_text("\n".join(lines), parse_mode="Markdown")
+        return
+
+    if resolved is None:
+        linked = get_linked_groups(dm_chat_id)
+        if not linked:
+            await message.reply_text(
+                "This DM isn't linked to any group yet.\n"
+                "Ask a group admin to run `!claude dm enable`, then use `!claude join <code>` here.",
+                parse_mode="Markdown"
+            )
+        elif len(linked) > 1 and not trip_selector:
+            lines = ["Linked to multiple groups — specify a trip with `#tripname`:"]
+            for gid in linked:
+                trips = get_trips(gid)
+                for t in trips:
+                    lines.append(f"  `#{t}` — from `{gid}`")
+            await message.reply_text("\n".join(lines), parse_mode="Markdown")
+        else:
+            await message.reply_text("❌ Trip not found in any linked group.")
+        return
+
+    group_chat_id, trip_name = resolved
+
+    if lower == "help" or body == "":
+        await message.reply_text(HELP_TEXT, parse_mode="Markdown")
+        return
+
+    # Delegate to the main process_message logic using the group's chat_id
+    await _process_group_message(message, context, body, lower, group_chat_id, trip_name, is_dm=True)
+
+
+async def _process_group_message(message, context, body: str, lower: str, chat_id: str, forced_trip: str | None, is_dm: bool = False) -> None:
+    """Core message dispatch — shared by group messages and DM-routed messages."""
+    dm_chat_id = str(message.chat_id) if is_dm else None
 
     if lower == "help" or body == "":
         await message.reply_text(HELP_TEXT, parse_mode="Markdown")
@@ -210,6 +409,8 @@ async def process_message(message, context: ContextTypes.DEFAULT_TYPE, text: str
                 msg += " It's been set as the default."
             msg += f"\n\nStart planning: `!claude <question>` or `!claude #{result} <question>`"
             await message.reply_text(msg, parse_mode="Markdown")
+            if is_dm and forced_trip:
+                log_dm_activity(chat_id, result, f"Trip created: {result}")
         else:
             await message.reply_text(f"❌ {result}")
         return
@@ -244,7 +445,7 @@ async def process_message(message, context: ContextTypes.DEFAULT_TYPE, text: str
     if lower == "reset" or lower.startswith("reset "):
         remainder = body[len("reset"):].strip()
         trip_selector, _ = parse_trip_selector(remainder)
-        trip_name = trip_selector or get_default_trip(chat_id)
+        trip_name = forced_trip or trip_selector or get_default_trip(chat_id)
         if not trip_name:
             await message.reply_text("No default trip set. Use `!claude trips` to see your trips.", parse_mode="Markdown")
             return
@@ -262,7 +463,7 @@ async def process_message(message, context: ContextTypes.DEFAULT_TYPE, text: str
     if lower == "summarize" or lower.startswith("summarize "):
         remainder = body[len("summarize"):].strip()
         trip_selector, _ = parse_trip_selector(remainder)
-        trip_name = trip_selector or get_default_trip(chat_id)
+        trip_name = forced_trip or trip_selector or get_default_trip(chat_id)
         if not trip_name:
             await message.reply_text("No default trip set. Use `!claude trips` to see your trips.", parse_mode="Markdown")
             return
@@ -276,17 +477,41 @@ async def process_message(message, context: ContextTypes.DEFAULT_TYPE, text: str
     if lower == "booked" or lower.startswith("booked "):
         remainder = body[len("booked"):].strip()
         trip_selector, _ = parse_trip_selector(remainder)
-        trip_name = trip_selector or get_default_trip(chat_id)
+        trip_name = forced_trip or trip_selector or get_default_trip(chat_id)
         if not trip_name:
             await message.reply_text("No default trip set. Use `!claude trips` to see your trips.", parse_mode="Markdown")
             return
         await send_chunked(message, _format_bookings_telegram(chat_id, trip_name))
         return
 
+    # ── Group admin DM enable/disable (only from group, not DM) ─────────────────
+    if not is_dm:
+        if lower == "dm enable":
+            if not await is_admin(message, context):
+                await message.reply_text("❌ Only group admins can enable DM access.")
+                return
+            code = generate_dm_code(chat_id)
+            await message.reply_text(
+                f"✅ DM access enabled.\n\n"
+                f"Share this join code with group members:\n"
+                f"`!claude join {code}`\n\n"
+                f"They can paste it in a direct message with the bot.",
+                parse_mode="Markdown"
+            )
+            return
+
+        if lower == "dm disable":
+            if not await is_admin(message, context):
+                await message.reply_text("❌ Only group admins can disable DM access.")
+                return
+            disable_dm_code(chat_id)
+            await message.reply_text("🔒 DM join code disabled. Existing DM links remain active.")
+            return
+
     if lower == "scan email" or lower.startswith("scan email "):
         remainder = body[len("scan email"):].strip()
         trip_selector, _ = parse_trip_selector(remainder)
-        trip_name = trip_selector or get_default_trip(chat_id)
+        trip_name = forced_trip or trip_selector or get_default_trip(chat_id)
         if not trip_name:
             await message.reply_text("No default trip set.", parse_mode="Markdown")
             return
@@ -313,7 +538,7 @@ async def process_message(message, context: ContextTypes.DEFAULT_TYPE, text: str
     if lower.startswith("book save"):
         args_str = body[len("book save"):].strip()
         trip_selector, args_str = parse_trip_selector(args_str)
-        trip_name = trip_selector or get_default_trip(chat_id)
+        trip_name = forced_trip or trip_selector or get_default_trip(chat_id)
         if not trip_name:
             await message.reply_text("No default trip set.", parse_mode="Markdown")
             return
@@ -346,6 +571,8 @@ async def process_message(message, context: ContextTypes.DEFAULT_TYPE, text: str
         lines = [f"✅ *{len(saved)} booking(s) saved to {trip_name}:*\n"]
         for bid, title, btype in saved:
             lines.append(f"  {icons.get(btype, '📌')} {title}  `{bid}`")
+            if is_dm:
+                log_dm_activity(chat_id, trip_name, f"Booking saved: {title}")
         lines.append("\nUse `!claude booked` to see all confirmed bookings.")
         await send_chunked(message, "\n".join(lines))
         return
@@ -353,7 +580,7 @@ async def process_message(message, context: ContextTypes.DEFAULT_TYPE, text: str
     if lower == "book skip" or lower.startswith("book skip "):
         remainder = body[len("book skip"):].strip()
         trip_selector, _ = parse_trip_selector(remainder)
-        trip_name = trip_selector or get_default_trip(chat_id)
+        trip_name = forced_trip or trip_selector or get_default_trip(chat_id)
         if not trip_name:
             await message.reply_text("No default trip set.")
             return
@@ -391,7 +618,7 @@ async def process_message(message, context: ContextTypes.DEFAULT_TYPE, text: str
             return
 
     trip_selector, question = parse_trip_selector(body)
-    trip_name = trip_selector or get_default_trip(chat_id)
+    trip_name = forced_trip or trip_selector or get_default_trip(chat_id)
 
     if not trip_name:
         await message.reply_text(
@@ -417,8 +644,11 @@ async def process_message(message, context: ContextTypes.DEFAULT_TYPE, text: str
     await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
     try:
         response = ask_claude(question, chat_id, trip_name)
-        header = f"_{trip_name}_\n" if trip_selector else ""
+        header = f"_{trip_name}_\n" if trip_selector and not forced_trip else ""
         await send_chunked(message, header + response)
+        if is_dm:
+            preview = question[:60] + ("…" if len(question) > 60 else "")
+            log_dm_activity(chat_id, trip_name, f"Asked: {preview}")
     except RuntimeError as e:
         logger.error("Claude API error: %s", e)
         await message.reply_text(f"❌ Claude error: {e}")
@@ -432,7 +662,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not message or not message.text:
         return
 
-    if ALLOWED_CHAT_ID and str(message.chat_id) != ALLOWED_CHAT_ID:
+    is_dm = message.chat.type == "private"
+    if not is_dm and not admin_config.is_allowed(str(message.chat_id)):
         logger.warning("Ignored message from unauthorized chat_id: %s", message.chat_id)
         return
 
@@ -468,7 +699,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not is_instant:
         await message.reply_text("🔍 On it, give me a moment…")
 
-    await process_message(message, context, text)
+    await process_message(message, context, text, is_dm=is_dm)
 
 
 async def handle_edited_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -476,7 +707,8 @@ async def handle_edited_message(update: Update, context: ContextTypes.DEFAULT_TY
     if not message or not message.text:
         return
 
-    if ALLOWED_CHAT_ID and str(message.chat_id) != ALLOWED_CHAT_ID:
+    is_dm = message.chat.type == "private"
+    if not is_dm and not admin_config.is_allowed(str(message.chat_id)):
         return
 
     text = message.text.strip()
@@ -496,7 +728,7 @@ async def handle_edited_message(update: Update, context: ContextTypes.DEFAULT_TY
             _responded_ids[chat_id] = set()
         _responded_ids[chat_id].add(message_id)
         await message.reply_text("🔍 On it, give me a moment…")
-        await process_message(message, context, text, is_edit=True)
+        await process_message(message, context, text, is_edit=True, is_dm=is_dm)
         return
 
     if new_has_trigger and original_had_trigger and already_responded:
@@ -507,51 +739,99 @@ async def handle_edited_message(update: Update, context: ContextTypes.DEFAULT_TY
             return
         logger.info("Substantive edit on message %d: '%s' → '%s'", message_id, old_body, new_body)
         await message.reply_text("📝 _(Message edited — responding to updated question)_", parse_mode="Markdown")
-        await process_message(message, context, text, is_edit=True)
+        await process_message(message, context, text, is_edit=True, is_dm=is_dm)
         return
 
     if new_has_trigger and not already_responded:
         if chat_id not in _responded_ids:
             _responded_ids[chat_id] = set()
         _responded_ids[chat_id].add(message_id)
-        await process_message(message, context, text, is_edit=True)
+        await process_message(message, context, text, is_edit=True, is_dm=is_dm)
         return
 
     logger.info("Edit on message %d ignored (no actionable change).", message_id)
 
 
 async def _daily_email_scan(context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not ALLOWED_CHAT_ID:
-        logger.warning("ALLOWED_CHAT_ID not set — skipping daily email scan")
+    chat_ids = admin_config.get_allowed()
+    if not chat_ids:
+        logger.info("Daily email scan: no allowed chats configured")
         return
-    chat_id = ALLOWED_CHAT_ID
-    trips = get_trips(chat_id)
-    if not trips:
+    for chat_id in chat_ids:
+        trips = get_trips(chat_id)
+        if not trips:
+            continue
+        for trip_name in trips:
+            try:
+                candidates = scan_for_bookings(chat_id, trip_name)
+            except Exception as e:
+                logger.error("Daily email scan failed for %s/%s: %s", chat_id, trip_name, e)
+                continue
+            if not candidates:
+                logger.info("Daily scan: no new bookings for %s/%s", chat_id, trip_name)
+                continue
+            set_pending(chat_id, trip_name, candidates)
+            header = f"📬 *Daily booking scan — {len(candidates)} new item(s) found for {trip_name}!*\n\n"
+            text = header + format_pending_for_telegram(chat_id, trip_name)
+            for chunk in chunk_message(text):
+                try:
+                    await context.bot.send_message(
+                        chat_id=int(chat_id), text=chunk, parse_mode=ParseMode.MARKDOWN
+                    )
+                except Exception as e:
+                    logger.error("Failed to send daily scan results to %s: %s", chat_id, e)
+
+
+async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Fires when the bot's membership status changes in any chat."""
+    result = update.my_chat_member
+    if not result:
         return
-    for trip_name in trips:
-        try:
-            candidates = scan_for_bookings(chat_id, trip_name)
-        except Exception as e:
-            logger.error("Daily email scan failed for %s: %s", trip_name, e)
-            continue
-        if not candidates:
-            logger.info("Daily scan: no new bookings for %s", trip_name)
-            continue
-        set_pending(chat_id, trip_name, candidates)
-        header = f"📬 *Daily booking scan — {len(candidates)} new item(s) found for {trip_name}!*\n\n"
-        text = header + format_pending_for_telegram(chat_id, trip_name)
-        for chunk in chunk_message(text):
+    new_status = result.new_chat_member.status
+    chat = result.chat
+
+    if chat.type == "private":
+        return
+
+    if new_status in ("member", "administrator"):
+        chat_id = str(chat.id)
+        chat_name = chat.title or chat_id
+        if admin_config.is_allowed(chat_id):
+            return
+        admin_config.add_pending(chat_id, chat_name)
+        logger.info("Bot added to new group: %s (%s)", chat_name, chat_id)
+        if BOT_OWNER_ID:
+            msg = (
+                f"🤖 The bot was added to *{chat_name}* (chat ID: `{chat_id}`).\n\n"
+                f"`!claude admin allow {chat_id}`\n"
+                f"`!claude admin deny {chat_id}`"
+            )
             try:
                 await context.bot.send_message(
-                    chat_id=int(chat_id), text=chunk, parse_mode=ParseMode.MARKDOWN
+                    chat_id=int(BOT_OWNER_ID), text=msg, parse_mode=ParseMode.MARKDOWN
                 )
             except Exception as e:
-                logger.error("Failed to send daily scan results: %s", e)
+                logger.error("Failed to notify owner of new group: %s", e)
+
+
+async def handle_migration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles group→supergroup migration (chat_id changes)."""
+    msg = update.message
+    if not msg:
+        return
+    if msg.migrate_to_chat_id:
+        old_id = str(msg.chat_id)
+        new_id = str(msg.migrate_to_chat_id)
+        logger.info("Group migration detected: %s → %s", old_id, new_id)
+        admin_config.rehome_chat(old_id, new_id)
+        rehome_history(old_id, new_id)
 
 
 def _setup_handlers(app: Application) -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE & filters.TEXT, handle_edited_message))
+    app.add_handler(ChatMemberHandler(handle_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
+    app.add_handler(MessageHandler(filters.StatusUpdate.MIGRATE, handle_migration))
     app.job_queue.run_daily(_daily_email_scan, time=datetime.time(hour=8, minute=0))
     logger.info("Daily email scan scheduled at 08:00")
 
@@ -645,6 +925,7 @@ def main() -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         raise ValueError("TELEGRAM_BOT_TOKEN is not set in .env")
+    admin_config.bootstrap_from_env()
 
     bot = BotManager(token)
     bot.start()

@@ -37,12 +37,15 @@ Edit `.env` and fill in your keys:
 TELEGRAM_BOT_TOKEN=...        # from BotFather
 ANTHROPIC_API_KEY=...
 SERPAPI_KEY=...
-ALLOWED_CHAT_ID=              # optional — your Telegram group chat ID
+BOT_OWNER_ID=...              # your Telegram user ID (find it via @userinfobot)
+ALLOWED_CHAT_IDS=             # optional — comma-separated group chat IDs to pre-allow on first run
 GMAIL_ADDRESS=...             # optional — for email scanning
 GMAIL_APP_PASSWORD=...        # 16-char app password from myaccount.google.com/apppasswords
 ```
 
 > **Important:** each key must be on its own line with no trailing content. A missing newline between two keys causes both to be silently misread — the most common symptom is the bot not responding to any messages because `TRIGGER_WORD` loaded incorrectly.
+
+**Finding your Telegram user ID:** message [@userinfobot](https://t.me/userinfobot) on Telegram — it replies with your numeric ID.
 
 To find your group chat ID, add the bot to the group, send a message, then check:
 ```
@@ -173,13 +176,19 @@ Type `!claude help` in the Telegram group for the full reference. Quick overview
 | `!claude hotels Rome 2026-07-15 2026-07-22 2` | Direct hotel search |
 | `!claude places best trattorias in Trastevere` | Place search |
 | `!claude events Florence 2026-07-20` | Local events |
+| `!claude dm enable` | (Group admin) Generate DM join code for private access |
+| `!claude join <code>` | (DM) Link your DM to a group's trips |
+| `!claude dm linked` | (DM) See which groups you're linked to |
 
 ---
 
 ## Troubleshooting
 
 **Bot doesn't respond to any messages**
-Check that `TRIGGER_WORD` is on its own line in `.env` with no other content appended. If the line is malformed (e.g. `TRIGGER_WORD=!claudeGMAIL_ADDRESS=...`), the bot loads the wrong trigger word and silently ignores everything.
+Two common causes: (1) Check that `TRIGGER_WORD` is on its own line in `.env` with no other content appended. If the line is malformed (e.g. `TRIGGER_WORD=!claudeGMAIL_ADDRESS=...`), the bot loads the wrong trigger word and silently ignores everything. (2) The group may not be in the allowed list — check `data/admin_config.json` or DM the bot as the owner with `!claude admin list`.
+
+**Bot was added to a group but never started responding**
+The group needs to be approved. If `BOT_OWNER_ID` is set, you should have received a DM with approve/deny commands. If not, DM the bot with `!claude admin allow <chat_id>`.
 
 **Email scanning fails with "GMAIL_ADDRESS must be set"**
 Same root cause — if `GMAIL_ADDRESS` is concatenated onto the end of another variable it will never be loaded. Verify each key is on its own line.
