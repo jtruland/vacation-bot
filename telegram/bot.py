@@ -351,22 +351,58 @@ async def _handle_dm(message, context, body: str, lower: str, dm_chat_id: str, s
         if "#" in args:
             group_ref, rest = args.split("#", 1)
             group_ref = group_ref.strip()
-            # Resolve: numeric ID (backward compat) or human name
-            if group_ref.lstrip("-").isdigit():
-                target_chat_id = group_ref
-            else:
-                target_chat_id = resolve_group_by_name(group_ref)
-                if not target_chat_id:
-                    await message.reply_text(f'❌ No group named "{group_ref}" found.', parse_mode="Markdown")
-                    return
-            trip_selector, remaining = parse_trip_selector(rest.strip())
-            if trip_selector:
-                reconstructed = f"{cmd} {remaining}".strip() if remaining else cmd
-                await _process_group_message(
-                    message, context, reconstructed, reconstructed.lower(),
-                    target_chat_id, trip_selector, is_dm=True
+
+            # Extract trip name — # was consumed by split above, so parse directly
+            rest_parts = rest.strip().split(None, 1)
+            trip_selector = rest_parts[0].lower() if rest_parts else None
+            remaining = rest_parts[1] if len(rest_parts) > 1 else ""
+
+            if not trip_selector:
+                await message.reply_text(
+                    f"Usage: `!claude {cmd} <group name> #<trip> [all|1 3]`", parse_mode="Markdown"
                 )
                 return
+
+            # Resolve group reference
+            if group_ref:
+                if group_ref.lstrip("-").isdigit():
+                    target_chat_id = group_ref
+                else:
+                    target_chat_id = resolve_group_by_name(group_ref)
+                    if not target_chat_id:
+                        await message.reply_text(
+                            f'❌ No group named "{group_ref}" found.', parse_mode="Markdown"
+                        )
+                        return
+            else:
+                # No group specified — find which allowed group has pending bookings for this trip
+                from shared.paths import list_chat_ids
+                from shared.pending_bookings import has_pending
+                allowed = set(admin_config.get_allowed())
+                matches = [cid for cid in list_chat_ids() if cid in allowed and has_pending(cid, trip_selector)]
+                if len(matches) == 1:
+                    target_chat_id = matches[0]
+                elif len(matches) > 1:
+                    lines = [f"Multiple groups have pending `{trip_selector}` bookings. Specify which:"]
+                    for cid in matches:
+                        name = get_group_name(cid) or cid
+                        lines.append(f"  `!claude {cmd} {name} #{trip_selector}`")
+                    await message.reply_text("\n".join(lines), parse_mode="Markdown")
+                    return
+                else:
+                    await message.reply_text(
+                        f"❌ No pending bookings for trip `{trip_selector}` in any group.",
+                        parse_mode="Markdown"
+                    )
+                    return
+
+            reconstructed = f"{cmd} {remaining}".strip() if remaining else cmd
+            await _process_group_message(
+                message, context, reconstructed, reconstructed.lower(),
+                target_chat_id, trip_selector, is_dm=True
+            )
+            return
+
         await message.reply_text(
             f"Usage: `!claude {cmd} <group name> #<trip> [all|1 3]`",
             parse_mode="Markdown"
