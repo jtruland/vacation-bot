@@ -276,6 +276,28 @@ async def _handle_dm(message, context, body: str, lower: str, dm_chat_id: str, s
         )
         return
 
+    # ── Owner book save/skip from DM (acts on a specific group's pending) ────────
+    if is_owner and (lower.startswith("book save") or lower.startswith("book skip")):
+        cmd = "book save" if lower.startswith("book save") else "book skip"
+        args = body[len(cmd):].strip()
+        parts = args.split(None, 1)
+        if parts and not parts[0].startswith("#"):
+            target_chat_id = parts[0]
+            rest = parts[1] if len(parts) > 1 else ""
+            trip_selector, remaining = parse_trip_selector(rest)
+            if trip_selector:
+                reconstructed = f"{cmd} {remaining}".strip() if remaining else cmd
+                await _process_group_message(
+                    message, context, reconstructed, reconstructed.lower(),
+                    target_chat_id, trip_selector, is_dm=True
+                )
+                return
+        await message.reply_text(
+            f"Usage: `!claude {cmd} <group_chat_id> #<trip> [all|1 3]`",
+            parse_mode="Markdown"
+        )
+        return
+
     # ── DM join/link commands ────────────────────────────────────────────────────
     if lower.startswith("join "):
         code = body[len("join "):].strip()
@@ -518,21 +540,29 @@ async def _process_group_message(message, context, body: str, lower: str, chat_i
         if trip_name not in get_trips(chat_id):
             await message.reply_text(f'❌ No trip called "{trip_name}" found.', parse_mode="Markdown")
             return
-        await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
-        await message.reply_text(f"📬 Scanning your email for *{trip_name}* bookings…", parse_mode="Markdown")
         try:
             candidates = scan_for_bookings(chat_id, trip_name)
         except RuntimeError as e:
-            await message.reply_text(f"❌ Email scan failed: {e}")
+            logger.error("Email scan failed for %s/%s: %s", chat_id, trip_name, e)
             return
         except Exception as e:
-            await message.reply_text(f"⚠️ Unexpected error during scan: {e}")
+            logger.error("Unexpected error during email scan for %s/%s: %s", chat_id, trip_name, e)
             return
         if not candidates:
-            await message.reply_text("✅ Scan complete — no new booking confirmations found.")
+            logger.info("Email scan: no new bookings for %s/%s", chat_id, trip_name)
             return
         set_pending(chat_id, trip_name, candidates)
-        await send_chunked(message, format_pending_for_telegram(chat_id, trip_name))
+        if BOT_OWNER_ID:
+            text = format_pending_for_telegram(chat_id, trip_name, owner_context=(chat_id, trip_name))
+            for chunk in chunk_message(text):
+                try:
+                    await context.bot.send_message(
+                        chat_id=int(BOT_OWNER_ID), text=chunk, parse_mode=ParseMode.MARKDOWN
+                    )
+                except Exception as e:
+                    logger.error("Failed to send scan results to owner DM: %s", e)
+        else:
+            await send_chunked(message, format_pending_for_telegram(chat_id, trip_name))
         return
 
     if lower.startswith("book save"):
@@ -558,14 +588,13 @@ async def _process_group_message(message, context, body: str, lower: str, chat_i
         if not to_save:
             await message.reply_text("❌ No valid items selected.")
             return
-        saved, email_ids = [], []
+        all_email_ids = [b["_email_msg_id"] for b in pending if b.get("_email_msg_id")]
+        saved = []
         for b in to_save:
             clean = {k: v for k, v in b.items() if not k.startswith("_")}
             saved.append((_add_booking(chat_id, trip_name, clean), b.get("title", "Unnamed"), b.get("type", "")))
-            if b.get("_email_msg_id"):
-                email_ids.append(b["_email_msg_id"])
-        if email_ids:
-            mark_seen(chat_id, email_ids)
+        if all_email_ids:
+            mark_seen(chat_id, all_email_ids)
         clear_pending(chat_id, trip_name)
         icons = {"flight": "✈️", "hotel": "🏨", "rental": "🚗", "activity": "🎭"}
         lines = [f"✅ *{len(saved)} booking(s) saved to {trip_name}:*\n"]
@@ -575,6 +604,16 @@ async def _process_group_message(message, context, body: str, lower: str, chat_i
                 log_dm_activity(chat_id, trip_name, f"Booking saved: {title}")
         lines.append("\nUse `!claude booked` to see all confirmed bookings.")
         await send_chunked(message, "\n".join(lines))
+        if is_dm:
+            group_lines = [f"✅ *{len(saved)} booking(s) added to {trip_name}:*"]
+            for _, title, btype in saved:
+                group_lines.append(f"  {icons.get(btype, '📌')} {title}")
+            try:
+                await context.bot.send_message(
+                    chat_id=int(chat_id), text="\n".join(group_lines), parse_mode=ParseMode.MARKDOWN
+                )
+            except Exception as e:
+                logger.error("Failed to notify group %s of saved bookings: %s", chat_id, e)
         return
 
     if lower == "book skip" or lower.startswith("book skip "):
@@ -772,14 +811,19 @@ async def _daily_email_scan(context: ContextTypes.DEFAULT_TYPE) -> None:
                 continue
             set_pending(chat_id, trip_name, candidates)
             header = f"📬 *Daily booking scan — {len(candidates)} new item(s) found for {trip_name}!*\n\n"
-            text = header + format_pending_for_telegram(chat_id, trip_name)
+            if BOT_OWNER_ID:
+                text = header + format_pending_for_telegram(chat_id, trip_name, owner_context=(chat_id, trip_name))
+                dest = int(BOT_OWNER_ID)
+            else:
+                text = header + format_pending_for_telegram(chat_id, trip_name)
+                dest = int(chat_id)
             for chunk in chunk_message(text):
                 try:
                     await context.bot.send_message(
-                        chat_id=int(chat_id), text=chunk, parse_mode=ParseMode.MARKDOWN
+                        chat_id=dest, text=chunk, parse_mode=ParseMode.MARKDOWN
                     )
                 except Exception as e:
-                    logger.error("Failed to send daily scan results to %s: %s", chat_id, e)
+                    logger.error("Failed to send daily scan results to %s: %s", dest, e)
 
 
 async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -74,9 +74,15 @@ def pick_pending(chat_id: str, trip_name: str, indices: list[int]) -> list[dict]
 _ICONS = {"flight": "✈️", "hotel": "🏨", "rental": "🚗", "activity": "🎭"}
 
 
-def format_pending_for_telegram(chat_id: str, trip_name: str) -> str:
+def format_pending_for_telegram(
+    chat_id: str,
+    trip_name: str,
+    owner_context: tuple[str, str] | None = None,
+) -> str:
     """
     Numbered list of pending bookings for display in Telegram.
+    When owner_context=(group_chat_id, trip_name) is provided, the save/skip
+    commands include the group context so the bot owner can act from their DM.
     """
     items = _load(chat_id, trip_name)
     if not items:
@@ -108,10 +114,19 @@ def format_pending_for_telegram(chat_id: str, trip_name: str) -> str:
 
         lines.append("")
 
-    lines.append(
-        "Reply with:\n"
-        "  `!claude book save all` — save all\n"
-        "  `!claude book save 1 3` — save specific items\n"
-        "  `!claude book skip` — discard without saving"
-    )
+    if owner_context:
+        oc_chat_id, oc_trip = owner_context
+        lines.append(
+            "Reply with:\n"
+            f"  `!claude book save {oc_chat_id} #{oc_trip} all` — save all\n"
+            f"  `!claude book save {oc_chat_id} #{oc_trip} 1 3` — save specific items\n"
+            f"  `!claude book skip {oc_chat_id} #{oc_trip}` — discard without saving"
+        )
+    else:
+        lines.append(
+            "Reply with:\n"
+            "  `!claude book save all` — save all\n"
+            "  `!claude book save 1 3` — save specific items\n"
+            "  `!claude book skip` — discard without saving"
+        )
     return "\n".join(lines)

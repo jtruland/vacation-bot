@@ -164,7 +164,7 @@ def format_for_prompt(chat_id: str, trip_name: str) -> str:
 
     sorted_b = sorted(bookings, key=lambda x: (
         BOOKING_ORDER.get(x.get("type"), 9),
-        x.get("start_date", "")
+        x.get("start_date") or ""
     ))
 
     lines = ["=== CONFIRMED BOOKINGS ==="]
@@ -193,7 +193,7 @@ def format_for_telegram(chat_id: str, trip_name: str) -> str:
 
     sorted_b = sorted(bookings, key=lambda x: (
         BOOKING_ORDER.get(x.get("type"), 9),
-        x.get("start_date", "")
+        x.get("start_date") or ""
     ))
 
     lines = [f"📋 *Confirmed Bookings — {trip_name}*\n"]

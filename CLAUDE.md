@@ -44,7 +44,7 @@ Runs as a **macOS LaunchDaemon** on a Mac Mini (`/Library/LaunchDaemons/com.vaca
     └── telegram.log              # all log output (written by FileHandler in bot.py)
 ```
 
-`chat_id` is stored as a "safe" string: negative group IDs have the `-` replaced with `neg` (e.g., `-1234` → `neg1234`).
+`chat_id` in code is the raw numeric string (e.g., `"-1001234567890"`). The "safe" form (replacing `-` with `neg`, e.g., `neg1001234567890`) is only used for file system directory names. `chat_dir(chat_id)` in `shared/paths.py` applies the conversion internally — callers always pass the raw form. Use `int(chat_id)` when calling `context.bot.send_message()`.
 
 ---
 
@@ -108,6 +108,10 @@ When the bot is added to a new group, `handle_my_chat_member` DMs `BOT_OWNER_ID`
 | `!claude admin deny <chat_id>` | Remove from pending |
 | `!claude admin revoke <chat_id>` | Remove from allowed; bot leaves |
 | `!claude admin rehome <old> <new>` | Manual chat ID migration |
+| `!claude book save <chat_id> #<trip> [all\|1 3]` | Save pending email-found bookings for a group/trip |
+| `!claude book skip <chat_id> #<trip>` | Discard pending email-found bookings for a group/trip |
+
+`<chat_id>` is the raw numeric group ID (e.g., `-1001234567890`). The pending-list DM sent by the scan includes pre-filled versions of these commands.
 
 ### Group migration (supergroup upgrade)
 
@@ -145,6 +149,8 @@ Group members can DM the bot to work on shared trips privately, without posting 
 - `chunk_message` splits long replies at paragraph/sentence boundaries (Telegram 4096-char limit)
 - `_responded_ids` tracks which message IDs have been answered to prevent double-responses on edit
 - `_evict_message_texts()` / `_evict_responded_ids()` cap unbounded dicts (2000 messages, 500 IDs per chat)
+- **Email scan routing**: `!claude scan email` and `_daily_email_scan` both send pending results to the owner's DM (silent in group). The group only receives a notification after bookings are confirmed via owner DM `book save`. Falls back to group posting when `BOT_OWNER_ID` is not set.
+- **`_handle_dm` dispatch order**: owner admin commands → owner book save/skip → DM join/link commands → trip routing. New owner-only DM commands must be added before the trip-routing block to avoid being swallowed by `resolve_dm_trip`.
 
 ### `shared/claude_client.py`
 - Model: `claude-haiku-4-5-20251001`
@@ -158,16 +164,21 @@ Group members can DM the bot to work on shared trips privately, without posting 
 ### `shared/bookings.py`
 - One JSON file per trip: `data/{safe_chat_id}/{trip_name}_bookings.json`
 - `add_booking` auto-generates ID: `{type[0]}{count:03d}_{uuid4[:4]}` (e.g., `f001_3a7c`)
-- `format_for_prompt` → compact string injected into system prompt
+- `format_for_prompt` → compact string injected into system prompt on **every** Claude call via `_build_system_prompt()`; any exception here breaks all Claude responses for that chat
 - `format_for_telegram` → Markdown for display in chat
 - Booking types: `flight`, `hotel`, `rental`, `activity`
+- Sort key uses `x.get("start_date") or ""` — `dict.get(key, default)` does NOT fall back to the default when the key exists with an explicit `null` value, so use `or ""` to handle null dates
 
 ### `shared/email_scanner.py`
 - Gmail IMAP with `X-GM-RAW` for full Gmail search syntax
 - `after:` date uses Gmail format (`YYYY/MM/DD`); subject terms use parentheses not inner quotes
 - Each email → Claude Haiku → structured JSON (or `{"is_booking": false}`)
-- Unseen emails tracked in `scanned_email_ids.json` to prevent reprocessing
+- Dedup: `scanned_email_ids.json` tracks all processed email IDs. `mark_seen(chat_id, ids)` is called after save **and** skip — and after a partial save, it is called with **all** pending IDs (not just the saved subset), so un-saved items don't resurface on the next scan.
 - `scan_for_bookings(chat_id, trip_name)` is the main entry point
+
+### `shared/pending_bookings.py`
+- Temporary store for email-scan results awaiting owner confirmation: `data/{safe_chat_id}/{trip_name}_pending.json`
+- `format_pending_for_telegram(chat_id, trip_name, owner_context=None)` — pass `owner_context=(chat_id, trip_name)` when sending to the owner's DM; this rewrites the save/skip commands at the bottom to include the group chat_id and trip prefix so the owner can act from DM.
 
 ---
 
@@ -204,10 +215,10 @@ pgrep -f "telegram/bot.py" | wc -l                   # should be 1
 | `!claude reset [#trip]` | Clear in-memory history |
 | `!claude summarize [#trip]` | Save planning summary to disk |
 | `!claude booked [#trip]` | Show confirmed bookings |
-| `!claude scan email [#trip]` | Scan Gmail for booking emails |
-| `!claude book save all` | Save all pending email finds |
-| `!claude book save 1 3` | Save specific pending items |
-| `!claude book skip` | Discard pending without saving |
+| `!claude scan email [#trip]` | Scan Gmail; results go to owner DM (silent in group) |
+| `!claude book save all` | Save all pending email finds (group fallback when no owner) |
+| `!claude book save 1 3` | Save specific pending items (group fallback) |
+| `!claude book skip` | Discard pending without saving (group fallback) |
 | `!claude flights <args>` | Direct flight search |
 | `!claude hotels <args>` | Direct hotel search |
 | `!claude rentals <args>` | Direct rental search |
@@ -226,6 +237,8 @@ pgrep -f "telegram/bot.py" | wc -l                   # should be 1
 | `!claude admin deny <id>` | (Owner DM) Remove from pending |
 | `!claude admin revoke <id>` | (Owner DM) Remove from allowed + leave |
 | `!claude admin rehome <old> <new>` | (Owner DM) Manual chat ID migration |
+| `!claude book save <chat_id> #<trip> [all\|1 3]` | (Owner DM) Save pending email finds for a group/trip |
+| `!claude book skip <chat_id> #<trip>` | (Owner DM) Discard pending email finds for a group/trip |
 
 ---
 
