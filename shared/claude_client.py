@@ -11,6 +11,7 @@ from shared.serpapi_client import (
     search_flights, search_hotels, search_rentals,
     search_places, search_reviews, search_events, search_explore,
     search_web, search_weather, convert_currency,
+    search_gas_nearby, search_gas_along_route,
 )
 from shared.bookings import (
     add_booking as _add_booking,
@@ -50,7 +51,8 @@ BASE_SYSTEM_PROMPT = (
     "If a question is unrelated to travel or vacation planning, gently redirect back "
     "to trip planning topics.\n\n"
     "You have access to real-time search tools for flights, hotels, vacation rentals, "
-    "places, reviews, events, travel exploration, web search, weather, and currency conversion. "
+    "places, reviews, events, travel exploration, web search, weather, currency conversion, "
+    "and gas prices along driving routes. "
     "Use them proactively whenever the user's question would benefit from live data — "
     "don't just answer from memory when a search would give a better, more accurate answer. "
     "When you use a search tool, briefly acknowledge what you're looking up before "
@@ -60,7 +62,10 @@ BASE_SYSTEM_PROMPT = (
     "If search_web still comes up short, tell the user to paste the hotel's website URL "
     "and you'll pull the info directly from it. "
     "Use search_weather proactively when dates or seasons are part of the conversation. "
-    "Use convert_currency for any budget or price question involving foreign currencies.\n\n"
+    "Use convert_currency for any budget or price question involving foreign currencies. "
+    "Use search_gas_nearby when someone asks about gas prices at or near a destination. "
+    "Use search_gas_along_route when planning a road trip leg — it returns GasBuddy-priced "
+    "stops at roughly equal intervals with Top Tier ratings and composite scores.\n\n"
     "You also have tools to record, list, update, and remove confirmed bookings "
     "(flights, hotels, car rentals, activities/dining). Use add_booking whenever "
     "someone mentions they have confirmed or booked something. Use list_bookings to "
@@ -342,6 +347,40 @@ TOOLS = [
             "properties": {"args": {"type": "string", "description": "'200 CHF to USD' or 'EUR to GBP'"}}
         }
     },
+    {
+        "name": "search_gas_nearby",
+        "description": (
+            "Find cheapest gas stations near a city or location with real-time GasBuddy prices, "
+            "Top Tier ratings, and composite scores. "
+            "Use when someone asks about gas prices at a destination or 'where's cheap gas near X?' "
+            "Args: city name, address, or 'lat,lng'. Example: 'Burlington VT' or '44.47,-73.21'"
+        ),
+        "input_schema": {
+            "type": "object",
+            "required": ["args"],
+            "properties": {"args": {"type": "string", "description": "City name, address, or 'lat,lng'"}}
+        }
+    },
+    {
+        "name": "search_gas_along_route",
+        "description": (
+            "Find gas stops with live GasBuddy pricing along a driving route. "
+            "Returns zones spaced along the route with ranked stations, prices, scores, and Top Tier status. "
+            "Use when planning a road trip leg — 'where should we fill up driving to X?' "
+            "Args: 'origin to destination' with optional road type in brackets. "
+            "Examples: 'Philadelphia PA to Montreal QC' or 'NYC to Miami [interstate]'"
+        ),
+        "input_schema": {
+            "type": "object",
+            "required": ["args"],
+            "properties": {
+                "args": {
+                    "type": "string",
+                    "description": "'origin to destination [road type: interstate|us_highway|state_route|local]'"
+                }
+            }
+        }
+    },
 ]
 
 # Map search tool names to their functions
@@ -353,9 +392,11 @@ _SEARCH_FUNCTIONS = {
     "search_reviews":   search_reviews,
     "search_events":    search_events,
     "search_explore":   search_explore,
-    "search_web":       search_web,
-    "search_weather":   search_weather,
-    "convert_currency": convert_currency,
+    "search_web":              search_web,
+    "search_weather":          search_weather,
+    "convert_currency":        convert_currency,
+    "search_gas_nearby":       search_gas_nearby,
+    "search_gas_along_route":  search_gas_along_route,
 }
 
 

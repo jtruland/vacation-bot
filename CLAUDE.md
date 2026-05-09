@@ -21,7 +21,8 @@ Runs as a **macOS LaunchDaemon** on a Mac Mini (`/Library/LaunchDaemons/com.vaca
 │   ├── admin_config.py           # Allowed-chat allowlist (data/admin_config.json) + rehome_chat()
 │   ├── dm_router.py              # DM join codes, link store, trip routing, activity log
 │   ├── claude_client.py          # Claude Haiku + tool-calling + conversation history
-│   ├── serpapi_client.py         # SerpApi wrappers: flights, hotels, rentals, places, etc.
+│   ├── serpapi_client.py         # SerpApi wrappers: flights, hotels, rentals, places, gas search, etc.
+│   ├── mcp_client.py             # Lightweight SSE/JSON-RPC MCP client for mcp.bitz.dev (gas tools)
 │   ├── web_fetcher.py            # URL extraction + content fetching
 │   ├── bookings.py               # Persistent booking CRUD (per chat_id + trip_name)
 │   ├── pending_bookings.py       # Temporary store for email-found bookings awaiting confirm
@@ -54,6 +55,7 @@ Runs as a **macOS LaunchDaemon** on a Mac Mini (`/Library/LaunchDaemons/com.vaca
 TELEGRAM_BOT_TOKEN=...        # from BotFather
 ANTHROPIC_API_KEY=...         # claude-haiku-4-5-20251001
 SERPAPI_KEY=...               # SerpApi
+MCP_API_KEY=...               # API key for mcp.bitz.dev — required for gas price tools
 TRIGGER_WORD=!claude          # default
 BOT_OWNER_ID=...              # your Telegram user ID — receives new-group approval DMs, gates admin commands
 ALLOWED_CHAT_IDS=             # optional bootstrap seed (comma-separated); ignored after admin_config.json exists
@@ -174,7 +176,16 @@ Group members can DM the bot to work on shared trips privately, without posting 
 - `search_web(args)` — SerpApi `google` engine; general fallback when Maps-based tools miss a property
 - `search_weather(args)` — wttr.in JSON API (no key); current conditions + 3-day forecast
 - `convert_currency(args)` — frankfurter.app (no key); ECB rates; args format `"200 CHF to USD"`
+- `search_gas_nearby(args)` — GasBuddy prices near a city or lat,lng via mcp.bitz.dev; geocodes text locations via `maps_geocode_address` MCP tool
+- `search_gas_along_route(args)` — args format `"Philadelphia PA to Montreal QC [interstate]"`; geocodes origin+destination, computes haversine for `lookahead_miles`, fetches zone waypoints from `maps_find_gas_stations_nearby`, then calls `gasbuddy_search_gas_by_gps` concurrently (4 workers) for each zone; top 3 stations per zone with Top Tier flag
 - `requests` is imported at the top; weather/currency use it directly (not the SerpApi library)
+
+### `shared/mcp_client.py`
+- `call_tool(tool_name, arguments)` — single public function; opens a fresh SSE connection to `mcp.bitz.dev` per call
+- Auth: `Authorization: Bearer <MCP_API_KEY>` on both SSE (`GET /sse`) and POST requests
+- Protocol: MCP 2024-11-05 over SSE — server sends `endpoint` event with POST URL, client sends `initialize` + `notifications/initialized` + `tools/call` (id=2), waits for id=2 response on SSE stream
+- Threading model: SSE reader runs in a daemon thread; result delivered to main thread via `Queue`; endpoints communicated via `threading.Event`
+- Gateway-side change required: add an API key auth path on `mcp.bitz.dev` that accepts `Bearer <MCP_API_KEY>` alongside the existing Google OAuth flow
 
 ### `shared/email_scanner.py`
 - Gmail IMAP with `X-GM-RAW` for full Gmail search syntax

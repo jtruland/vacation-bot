@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased] — 2026-05-09 (build 3)
+
+### Added
+
+**Gas price search (`search_gas_nearby`, `search_gas_along_route`)**
+- Live GasBuddy prices, Top Tier ratings, and composite scores via `mcp.bitz.dev`.
+- `search_gas_nearby` — ranked stations near a city or lat/lng. Claude uses this when someone asks about gas prices at a destination.
+- `search_gas_along_route` — zone-based stops along a driving route. Origin geocoded, destination geocoded for lookahead distance, then up to ~6 GasBuddy lookups run concurrently. Output groups top 3 ranked stations per zone with price, distance, score, and Top Tier flag.
+- Requires `MCP_API_KEY` in `.env` and a matching API key auth path on the `mcp.bitz.dev` gateway (gateway-side change by Jon).
+- Files: `shared/mcp_client.py` (new — SSE/JSON-RPC MCP client), `shared/serpapi_client.py`, `shared/claude_client.py`, `env.template`
+
+**Python MCP client (`shared/mcp_client.py`)**
+- Lightweight SSE+JSON-RPC client for `mcp.bitz.dev`. Handles MCP protocol 2024-11-05: SSE endpoint discovery, `initialize` handshake, `notifications/initialized`, `tools/call`. Each call opens a fresh SSE connection in a background thread; results are returned synchronously via a `Queue`. Auth via `Authorization: Bearer <MCP_API_KEY>`.
+
 ## [Unreleased] — 2026-05-09 (build 2)
 
 ### Added

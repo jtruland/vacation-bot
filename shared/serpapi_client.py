@@ -12,8 +12,11 @@ Supported engines:
   - google_events          -> !claude events
   - google_travel_explore  -> !claude explore
 """
+import math
 import os
+import re
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -595,7 +598,6 @@ def search_weather(args: str) -> str:
 
 def convert_currency(args: str) -> str:
     """Convert between currencies using ECB rates via frankfurter.app."""
-    import re
     args = args.strip().upper()
     m = re.match(r'^(?:([\d,\.]+)\s+)?([A-Z]{3})\s+TO\s+([A-Z]{3})$', args)
     if not m:
@@ -620,3 +622,145 @@ def convert_currency(args: str) -> str:
         )
     except Exception as e:
         return f"⚠️ Currency conversion failed: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Gas prices (GasBuddy + Google Maps via mcp.bitz.dev)
+# Requires MCP_API_KEY in .env
+# ---------------------------------------------------------------------------
+
+def _mcp_geocode(location: str) -> tuple[float, float, str]:
+    """Geocode a location string. Returns (lat, lng, display_name)."""
+    from shared.mcp_client import call_tool
+    result = call_tool("maps_geocode_address", {"address": location})
+    lat_m = re.search(r'Latitude:\s*([\-\d.]+)', result)
+    lng_m = re.search(r'Longitude:\s*([\-\d.]+)', result)
+    addr_m = re.search(r'Address:\s*(.+)', result)
+    if not lat_m or not lng_m:
+        raise ValueError(f"Could not geocode \"{location}\"")
+    return (
+        float(lat_m.group(1)),
+        float(lng_m.group(1)),
+        addr_m.group(1).strip() if addr_m else location,
+    )
+
+
+def _haversine_miles(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
+    return 3958.8 * 2 * math.asin(math.sqrt(a))
+
+
+def _parse_zones(text: str) -> list[tuple[int, str, float, float]]:
+    """Parse (miles, city, lat, lng) tuples from maps_find_gas_stations_nearby output."""
+    pattern = re.compile(
+        r'~(\d+) miles ahead — (.+?)\n\s+Waypoint:\s*([\d.]+),\s*([\-\d.]+)',
+        re.MULTILINE,
+    )
+    return [
+        (int(m.group(1)), m.group(2).strip(), float(m.group(3)), float(m.group(4)))
+        for m in pattern.finditer(text)
+    ]
+
+
+def _top_gas_lines(gas_text: str, n: int = 3) -> list[str]:
+    """Extract compact top-N station lines from gasbuddy_search_gas_by_gps output."""
+    blocks = re.split(r'\n(?=\d+\.)', gas_text.strip())
+    lines = []
+    for block in blocks[1:n + 1]:
+        station = block.split('\n')[0].strip()
+        top_tier = (
+            "  ✅" if "✅ Top Tier (confirmed)" in block
+            else ("  🔶" if "🔶 Top Tier (probable)" in block else "")
+        )
+        lines.append(f"  {station}{top_tier}")
+    return lines or ["  _(no pricing data)_"]
+
+
+def search_gas_nearby(args: str) -> str:
+    """Cheapest gas near a city or lat,lng — uses GasBuddy via mcp.bitz.dev."""
+    from shared.mcp_client import call_tool
+    args = args.strip()
+    if not args:
+        return "❌ Provide a city or location."
+
+    lat_lng_m = re.match(r'^([\-\d.]+)\s*,\s*([\-\d.]+)$', args)
+    if lat_lng_m:
+        lat, lng = float(lat_lng_m.group(1)), float(lat_lng_m.group(2))
+        display = args
+    else:
+        try:
+            lat, lng, display = _mcp_geocode(args)
+        except Exception as e:
+            return f"⚠️ Couldn't locate \"{args}\": {e}"
+
+    try:
+        result = call_tool("gasbuddy_search_gas_by_gps", {"lat": lat, "lng": lng})
+        return result.replace(f"near {lat},{lng}", f"near {display}", 1)
+    except RuntimeError as e:
+        return f"⚠️ Gas price lookup failed: {e}"
+
+
+def search_gas_along_route(args: str) -> str:
+    """Gas stops with live GasBuddy pricing along a driving route."""
+    from shared.mcp_client import call_tool
+    args = args.strip()
+    m = re.match(r'^(.+?)\s+to\s+(.+?)(?:\s+\[([^\]]*)\])?$', args, re.IGNORECASE)
+    if not m:
+        return "❌ Format: `Philadelphia PA to Montreal QC` or `NYC to Miami [interstate]`"
+
+    origin_str  = m.group(1).strip()
+    dest_str    = m.group(2).strip()
+    road_hint   = m.group(3).strip() if m.group(3) else None
+
+    # Geocode origin
+    try:
+        origin_lat, origin_lng, origin_display = _mcp_geocode(origin_str)
+    except Exception as e:
+        return f"⚠️ Couldn't locate origin \"{origin_str}\": {e}"
+
+    # Geocode destination to estimate route distance for lookahead
+    try:
+        dest_lat, dest_lng, _ = _mcp_geocode(dest_str)
+        lookahead = max(100, int(_haversine_miles(origin_lat, origin_lng, dest_lat, dest_lng) * 1.4))
+    except Exception:
+        lookahead = 500
+
+    # Get zone waypoints along the route
+    zone_params: dict = {
+        "lat": origin_lat,
+        "lng": origin_lng,
+        "destination": dest_str,
+        "lookahead_miles": lookahead,
+    }
+    if road_hint:
+        zone_params["road_hint"] = road_hint
+
+    try:
+        zones_text = call_tool("maps_find_gas_stations_nearby", zone_params)
+    except RuntimeError as e:
+        return f"⚠️ Route lookup failed: {e}"
+
+    zones = _parse_zones(zones_text)
+    if not zones:
+        return f"No gas zones found for route {origin_str} → {dest_str}."
+
+    # Fetch GasBuddy prices for each zone concurrently
+    def _fetch_zone(zone: tuple) -> tuple:
+        miles, city, lat, lng = zone
+        try:
+            return miles, city, call_tool("gasbuddy_search_gas_by_gps", {"lat": lat, "lng": lng})
+        except Exception as exc:
+            return miles, city, f"_(price lookup failed: {exc})_"
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        zone_results = list(executor.map(_fetch_zone, zones))
+
+    lines = [f"⛽ *Gas stops: {origin_display} → {dest_str}*\n"]
+    for miles, city, gas_text in zone_results:
+        lines.append(f"*~{miles} mi — {city}*")
+        lines.extend(_top_gas_lines(gas_text, 3))
+        lines.append("")
+
+    return "\n".join(lines)
