@@ -786,7 +786,7 @@ async def _process_group_message(message, context, body: str, lower: str, chat_i
             await message.reply_text(f"❌ No booking `{booking_id}` found in *{trip_name}*. Use `!claude booked` to see IDs.", parse_mode="Markdown")
         return
 
-    _EDITABLE = {"title", "start_date", "end_date", "confirmation", "cost", "notes"}
+    _EDITABLE = {"title", "start_date", "end_date", "confirmation", "cost", "notes", "party"}
     if lower.startswith("book edit"):
         remainder = body[len("book edit"):].strip()
         trip_selector, remainder = parse_trip_selector(remainder)

@@ -150,6 +150,9 @@ def _booking_lines_prompt(b: dict) -> list[str]:
     if b.get("notes"):
         lines.append(f"   Notes: {b['notes']}")
 
+    if b.get("party"):
+        lines.append(f"   Party: {b['party']}")
+
     return lines
 
 
@@ -194,7 +197,7 @@ def format_for_telegram(chat_id: str, trip_name: str) -> str:
     if not bookings:
         return f"No confirmed bookings yet for *{trip_name}*."
 
-    events = []      # (date_str, sort_key, line)
+    events = []      # (date_str, sort_key, line, sub_lines)
     incomplete = []  # bookings missing itinerary-critical fields
 
     for b in bookings:
@@ -227,19 +230,40 @@ def format_for_telegram(chat_id: str, trip_name: str) -> str:
             time_s = details.get("time", "")
             label = f"{icon} {title}" + (f", {time_s}" if time_s else "")
 
-        events.append((start, start + "a", f"{label}   ({bid})"))
+        # Build sub-detail lines shown below the primary event
+        sub_lines: list[str] = []
+        if btype == "flight":
+            parts = []
+            if details.get("passengers"):
+                parts.append(f"{details['passengers']} passenger(s)")
+            if details.get("cabin_class"):
+                parts.append(details["cabin_class"])
+            if parts:
+                sub_lines.append(" · ".join(parts))
+        elif btype == "hotel":
+            parts = []
+            if details.get("rooms"):
+                parts.append(f"{details['rooms']} room(s)")
+            if details.get("guests"):
+                parts.append(f"{details['guests']} guest(s)")
+            if parts:
+                sub_lines.append(" · ".join(parts))
+        if b.get("party"):
+            sub_lines.append(f"Party: {b['party']}")
 
-        # Secondary event (check-out / return / arrival)
+        events.append((start, start + "a", f"{label}   ({bid})", sub_lines))
+
+        # Secondary event (check-out / return / arrival) — no sub-lines
         if end and end != start:
             if btype == "hotel":
-                events.append((end, end + "z", f"🏨 Check-out: {title}   ({bid})"))
+                events.append((end, end + "z", f"🏨 Check-out: {title}   ({bid})", []))
             elif btype == "rental":
-                events.append((end, end + "z", f"🚗 Return: {title}   ({bid})"))
+                events.append((end, end + "z", f"🚗 Return: {title}   ({bid})", []))
             elif btype == "flight":
                 arr_time = details.get("arrival_time", "")
                 arr_time_str = f"{arr_time} " if arr_time else ""
                 arr_label = f"✈️ Arrives {arr_time_str}{details.get('arrival_airport', '') or title}"
-                events.append((end, end + "z", f"{arr_label}   ({bid})"))
+                events.append((end, end + "z", f"{arr_label}   ({bid})", []))
 
     events.sort(key=lambda e: e[1])
     lines = [f"📋 *Itinerary — {trip_name}*\n"]
@@ -255,13 +279,28 @@ def format_for_telegram(chat_id: str, trip_name: str) -> str:
         except ValueError:
             header = f"*{date_str}*"
         lines.append(header)
-        for _, _, event_line in group:
+        for _, _, event_line, sub_lines in group:
             lines.append(f"  {event_line}")
+            for sl in sub_lines:
+                lines.append(f"    _{sl}_")
         lines.append("")
 
     total = sum(float(b.get("cost") or 0) for b in bookings if b.get("cost"))
     if total > 0:
         lines.append(f"*Total booked: ${total:,.2f}*")
+
+    # Per-party cost breakdown (shown when bookings span more than one party label)
+    from collections import defaultdict
+    party_totals: dict = defaultdict(float)
+    for b in bookings:
+        key = (b.get("party") or "Shared").strip()
+        try:
+            party_totals[key] += float(b.get("cost") or 0)
+        except (ValueError, TypeError):
+            pass
+    if len(party_totals) > 1:
+        parts = [f"{k}: ${v:,.2f}" for k, v in sorted(party_totals.items())]
+        lines.append("  ".join(parts))
 
     if incomplete:
         lines.append(f"\n---\n⚠️ *{len(incomplete)} booking(s) need attention:*")

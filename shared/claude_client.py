@@ -236,6 +236,7 @@ TOOLS = [
                 "cost":       {"type": "number"},
                 "currency":   {"type": "string", "description": "Currency code, default USD"},
                 "notes":      {"type": "string"},
+                "party":      {"type": "string", "description": "Optional label for which group this booking covers (e.g. 'us', 'them', 'all'). Used for per-party cost totals."},
                 "booked_by":  {"type": "string"},
                 "details": {
                     "type": "object",
