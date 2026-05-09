@@ -664,18 +664,60 @@ def _parse_zones(text: str) -> list[tuple[int, str, float, float]]:
     ]
 
 
-def _top_gas_lines(gas_text: str, n: int = 3) -> list[str]:
-    """Extract compact top-N station lines from gasbuddy_search_gas_by_gps output."""
-    blocks = re.split(r'\n(?=\d+\.)', gas_text.strip())
-    lines = []
-    for block in blocks[1:n + 1]:
-        station = block.split('\n')[0].strip()
-        top_tier = (
-            "  ✅" if "✅ Top Tier (confirmed)" in block
-            else ("  🔶" if "🔶 Top Tier (probable)" in block else "")
+def _parse_gas_stations(gas_text: str) -> tuple[str, list[dict]]:
+    """
+    Parse gasbuddy_search_gas_by_gps output into (fuel_type, stations).
+    Each station: rank, brand, street, city_state, price, distance, score, top_tier.
+    """
+    fuel_m = re.search(r'Cheapest\s+(\w+)\s+gas\s+near', gas_text, re.IGNORECASE)
+    fuel_type = fuel_m.group(1).capitalize() if fuel_m else "Regular"
+
+    stations = []
+    for block in re.split(r'\n(?=\d+\.)', gas_text.strip()):
+        m = re.match(
+            r'^(\d+)\.\s+(.+?)\s+—\s+\$([0-9.]+)\s+([0-9.]+)mi\s+\[score:\s+([0-9.]+)\]',
+            block.strip(),
         )
-        lines.append(f"  {station}{top_tier}")
-    return lines or ["  _(no pricing data)_"]
+        if not m:
+            continue
+        lines = [l.strip() for l in block.split('\n') if l.strip()]
+        # GasBuddy output: line 0 = "N. Brand — ...", line 1 = street, line 2 = city/state
+        street     = lines[1] if len(lines) > 1 else ""
+        city_state = lines[2] if len(lines) > 2 else ""
+        top_tier = (
+            "✅" if any("✅ Top Tier (confirmed)" in l for l in lines)
+            else ("🔶" if any("🔶 Top Tier (probable)" in l for l in lines) else "")
+        )
+        stations.append({
+            "rank":       int(m.group(1)),
+            "brand":      m.group(2).strip(),
+            "street":     street,
+            "city_state": city_state,
+            "price":      f"${m.group(3)}",
+            "distance":   f"{m.group(4)} mi",
+            "score":      m.group(5),
+            "top_tier":   top_tier,
+        })
+    return fuel_type, stations
+
+
+def _format_gas_table(stations: list[dict], fuel_type: str, n: int | None = None) -> str:
+    """Format stations as a Markdown table per gasbuddy_display_instructions.md."""
+    subset = stations[:n] if n else stations
+    if not subset:
+        return ""
+    rows = [
+        "| Rank | Station | Price | Distance | Score | Quality |",
+        "|------|---------|-------|----------|-------|---------|",
+    ]
+    for s in subset:
+        # Station cell: Name, then city/state, then street (per instructions)
+        station_cell = f"**{s['brand']}**<br>{s['city_state']}<br>{s['street']}"
+        quality = f"{fuel_type} {s['top_tier']}".strip()
+        rows.append(
+            f"| {s['rank']} | {station_cell} | {s['price']} | {s['distance']} | {s['score']} | {quality} |"
+        )
+    return "\n".join(rows)
 
 
 def search_gas_nearby(args: str) -> str:
@@ -696,10 +738,16 @@ def search_gas_nearby(args: str) -> str:
             return f"⚠️ Couldn't locate \"{args}\": {e}"
 
     try:
-        result = call_tool("gasbuddy_search_gas_by_gps", {"lat": lat, "lng": lng})
-        return result.replace(f"near {lat},{lng}", f"near {display}", 1)
+        raw = call_tool("gasbuddy_search_gas_by_gps", {"lat": lat, "lng": lng})
     except RuntimeError as e:
         return f"⚠️ Gas price lookup failed: {e}"
+
+    fuel_type, stations = _parse_gas_stations(raw)
+    if not stations:
+        return f"⚠️ No gas pricing data found near {display}."
+
+    table = _format_gas_table(stations, fuel_type)
+    return f"⛽ *Cheapest gas near {display}*\n\n{table}"
 
 
 def search_gas_along_route(args: str) -> str:
@@ -710,24 +758,21 @@ def search_gas_along_route(args: str) -> str:
     if not m:
         return "❌ Format: `Philadelphia PA to Montreal QC` or `NYC to Miami [interstate]`"
 
-    origin_str  = m.group(1).strip()
-    dest_str    = m.group(2).strip()
-    road_hint   = m.group(3).strip() if m.group(3) else None
+    origin_str = m.group(1).strip()
+    dest_str   = m.group(2).strip()
+    road_hint  = m.group(3).strip() if m.group(3) else None
 
-    # Geocode origin
     try:
         origin_lat, origin_lng, origin_display = _mcp_geocode(origin_str)
     except Exception as e:
         return f"⚠️ Couldn't locate origin \"{origin_str}\": {e}"
 
-    # Geocode destination to estimate route distance for lookahead
     try:
         dest_lat, dest_lng, _ = _mcp_geocode(dest_str)
         lookahead = max(100, int(_haversine_miles(origin_lat, origin_lng, dest_lat, dest_lng) * 1.4))
     except Exception:
         lookahead = 500
 
-    # Get zone waypoints along the route
     zone_params: dict = {
         "lat": origin_lat,
         "lng": origin_lng,
@@ -746,21 +791,41 @@ def search_gas_along_route(args: str) -> str:
     if not zones:
         return f"No gas zones found for route {origin_str} → {dest_str}."
 
-    # Fetch GasBuddy prices for each zone concurrently
     def _fetch_zone(zone: tuple) -> tuple:
         miles, city, lat, lng = zone
         try:
-            return miles, city, call_tool("gasbuddy_search_gas_by_gps", {"lat": lat, "lng": lng})
-        except Exception as exc:
-            return miles, city, f"_(price lookup failed: {exc})_"
+            raw = call_tool("gasbuddy_search_gas_by_gps", {"lat": lat, "lng": lng})
+            fuel_type, stations = _parse_gas_stations(raw)
+            return miles, city, fuel_type, stations
+        except Exception:
+            return miles, city, "Regular", []
 
     with ThreadPoolExecutor(max_workers=4) as executor:
-        zone_results = list(executor.map(_fetch_zone, zones))
+        zone_data = list(executor.map(_fetch_zone, zones))
 
-    lines = [f"⛽ *Gas stops: {origin_display} → {dest_str}*\n"]
-    for miles, city, gas_text in zone_results:
-        lines.append(f"*~{miles} mi — {city}*")
-        lines.extend(_top_gas_lines(gas_text, 3))
-        lines.append("")
+    # Build output: zone headers + tables, gap flags between empty zones
+    parts = [f"⛽ *Gas stops: {origin_display} → {dest_str}*\n"]
+    zone_num = 0
+    gap_start: int | None = None
 
-    return "\n".join(lines)
+    for miles, city, fuel_type, stations in zone_data:
+        if not stations:
+            if gap_start is None:
+                gap_start = miles
+        else:
+            if gap_start is not None:
+                parts.append(
+                    f"⚠️ Gap — ~{gap_start} to ~{miles} miles: No stations found in GasBuddy\n"
+                )
+                gap_start = None
+            zone_num += 1
+            table = _format_gas_table(stations, fuel_type, n=3)
+            parts.append(f"**Zone {zone_num} — {city} (~{miles} miles)**\n{table}\n")
+
+    if gap_start is not None:
+        last_miles = zone_data[-1][0]
+        parts.append(
+            f"⚠️ Gap — ~{gap_start} to ~{last_miles} miles: No stations found in GasBuddy"
+        )
+
+    return "\n".join(parts)
