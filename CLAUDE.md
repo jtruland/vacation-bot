@@ -151,6 +151,7 @@ Group members can DM the bot to work on shared trips privately, without posting 
 - `_evict_message_texts()` / `_evict_responded_ids()` cap unbounded dicts (2000 messages, 500 IDs per chat)
 - **Email scan routing**: `!claude scan email` and `_daily_email_scan` both send pending results to the owner's DM (silent in group). The group only receives a notification after bookings are confirmed via owner DM `book save`. Falls back to group posting when `BOT_OWNER_ID` is not set.
 - **`_handle_dm` dispatch order**: owner admin commands → owner book save/skip → DM join/link commands → trip routing. New owner-only DM commands must be added before the trip-routing block to avoid being swallowed by `resolve_dm_trip`.
+- **Reply-based conversation**: `handle_message` checks `message.reply_to_message.from_user.id == context.bot.id`; if True, processes the message even without the trigger word. `strip_trigger` returns the full text unchanged (no trigger present), which falls through to `ask_claude()` naturally.
 
 ### `shared/claude_client.py`
 - Model: `claude-haiku-4-5-20251001`
@@ -168,6 +169,12 @@ Group members can DM the bot to work on shared trips privately, without posting 
 - `format_for_telegram` → Markdown for display in chat
 - Booking types: `flight`, `hotel`, `rental`, `activity`
 - Sort key uses `x.get("start_date") or ""` — `dict.get(key, default)` does NOT fall back to the default when the key exists with an explicit `null` value, so use `or ""` to handle null dates
+
+### `shared/serpapi_client.py`
+- `search_web(args)` — SerpApi `google` engine; general fallback when Maps-based tools miss a property
+- `search_weather(args)` — wttr.in JSON API (no key); current conditions + 3-day forecast
+- `convert_currency(args)` — frankfurter.app (no key); ECB rates; args format `"200 CHF to USD"`
+- `requests` is imported at the top; weather/currency use it directly (not the SerpApi library)
 
 ### `shared/email_scanner.py`
 - Gmail IMAP with `X-GM-RAW` for full Gmail search syntax

@@ -9,7 +9,8 @@ from shared.paths import chat_dir
 from shared.web_fetcher import extract_urls, build_url_context
 from shared.serpapi_client import (
     search_flights, search_hotels, search_rentals,
-    search_places, search_reviews, search_events, search_explore
+    search_places, search_reviews, search_events, search_explore,
+    search_web, search_weather, convert_currency,
 )
 from shared.bookings import (
     add_booking as _add_booking,
@@ -49,11 +50,17 @@ BASE_SYSTEM_PROMPT = (
     "If a question is unrelated to travel or vacation planning, gently redirect back "
     "to trip planning topics.\n\n"
     "You have access to real-time search tools for flights, hotels, vacation rentals, "
-    "places, reviews, events, and travel exploration. Use them proactively whenever "
-    "the user's question would benefit from live data — don't just answer from memory "
-    "when a search would give a better, more accurate answer. "
+    "places, reviews, events, travel exploration, web search, weather, and currency conversion. "
+    "Use them proactively whenever the user's question would benefit from live data — "
+    "don't just answer from memory when a search would give a better, more accurate answer. "
     "When you use a search tool, briefly acknowledge what you're looking up before "
-    "presenting the results.\n\n"
+    "presenting the results. "
+    "If search_places or search_reviews can't find a specific hotel or venue, immediately "
+    "try search_web with the property name and city — don't give up after one tool. "
+    "If search_web still comes up short, tell the user to paste the hotel's website URL "
+    "and you'll pull the info directly from it. "
+    "Use search_weather proactively when dates or seasons are part of the conversation. "
+    "Use convert_currency for any budget or price question involving foreign currencies.\n\n"
     "You also have tools to record, list, update, and remove confirmed bookings "
     "(flights, hotels, car rentals, activities/dining). Use add_booking whenever "
     "someone mentions they have confirmed or booked something. Use list_bookings to "
@@ -294,17 +301,61 @@ TOOLS = [
             }
         }
     },
+    {
+        "name": "search_web",
+        "description": (
+            "General Google web search. Use when search_places or search_reviews can't find "
+            "a specific hotel, restaurant, or venue — especially boutique properties not well-indexed "
+            "on Google Maps. Also useful for visa requirements, destination guides, travel advisories, "
+            "packing lists, and any question that benefits from current web results. "
+            "Args: plain search query, e.g. 'Hotel Waldstätterhof Lucerne reviews'"
+        ),
+        "input_schema": {
+            "type": "object",
+            "required": ["args"],
+            "properties": {"args": {"type": "string", "description": "Search query"}}
+        }
+    },
+    {
+        "name": "search_weather",
+        "description": (
+            "Get current weather conditions and a 3-day forecast for any city or destination. "
+            "Use whenever the user asks about weather, what to pack, or best time to visit. "
+            "Args: city or location name, e.g. 'Lucerne' or 'Swiss Alps'"
+        ),
+        "input_schema": {
+            "type": "object",
+            "required": ["args"],
+            "properties": {"args": {"type": "string", "description": "City or location"}}
+        }
+    },
+    {
+        "name": "convert_currency",
+        "description": (
+            "Convert an amount between currencies using current ECB exchange rates. "
+            "Use for budget questions like 'how much is 200 CHF in dollars?' or 'what's the EUR/USD rate?' "
+            "Args format: '200 CHF to USD' or 'EUR to GBP' (amount optional, defaults to 1)"
+        ),
+        "input_schema": {
+            "type": "object",
+            "required": ["args"],
+            "properties": {"args": {"type": "string", "description": "'200 CHF to USD' or 'EUR to GBP'"}}
+        }
+    },
 ]
 
 # Map search tool names to their functions
 _SEARCH_FUNCTIONS = {
-    "search_flights":  search_flights,
-    "search_hotels":   search_hotels,
-    "search_rentals":  search_rentals,
-    "search_places":   search_places,
-    "search_reviews":  search_reviews,
-    "search_events":   search_events,
-    "search_explore":  search_explore,
+    "search_flights":   search_flights,
+    "search_hotels":    search_hotels,
+    "search_rentals":   search_rentals,
+    "search_places":    search_places,
+    "search_reviews":   search_reviews,
+    "search_events":    search_events,
+    "search_explore":   search_explore,
+    "search_web":       search_web,
+    "search_weather":   search_weather,
+    "convert_currency": convert_currency,
 }
 
 

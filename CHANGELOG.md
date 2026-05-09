@@ -1,6 +1,32 @@
 # Changelog
 
-## [Unreleased] — 2026-05-09
+## [Unreleased] — 2026-05-09 (build 2)
+
+### Added
+
+**General web search (`search_web`)**
+- New tool using SerpApi's Google engine. Claude falls back to this automatically when `search_places` or `search_reviews` can't find a specific hotel or venue (e.g., boutique properties not well-indexed on Maps). Returns top 5 organic results with title, snippet, and URL.
+- Files: `shared/serpapi_client.py`, `shared/claude_client.py`
+
+**Weather forecasts (`search_weather`)**
+- Live current conditions and 3-day forecast via wttr.in. No API key required. Claude uses this proactively when dates or seasons are mentioned.
+- Files: `shared/serpapi_client.py`, `shared/claude_client.py`
+
+**Currency conversion (`convert_currency`)**
+- Exchange rates via frankfurter.app (European Central Bank data). No API key required. Args format: `"200 CHF to USD"` or `"EUR to GBP"`.
+- Files: `shared/serpapi_client.py`, `shared/claude_client.py`
+
+**Reply-based conversation (no trigger word required)**
+- Users can now reply directly to any bot message without typing `!claude`. The bot detects `message.reply_to_message.from_user.id == context.bot.id` and processes the reply naturally. Commands typed with `!claude` in replies still work.
+- File: `telegram/bot.py` — `handle_message`
+
+### Changed
+
+**System prompt tool guidance**
+- Updated `BASE_SYSTEM_PROMPT` to instruct Claude to chain `search_web` as a fallback when Maps tools fail, suggest URL pasting as a last resort, and use weather/currency tools proactively.
+- File: `shared/claude_client.py`
+
+## [Unreleased] — 2026-05-09 (build 1)
 
 ### Fixed
 

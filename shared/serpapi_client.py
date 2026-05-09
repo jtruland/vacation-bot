@@ -13,6 +13,7 @@ Supported engines:
   - google_travel_explore  -> !claude explore
 """
 import os
+import requests
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -514,3 +515,108 @@ def search_explore(args: str) -> str:
         return str(e)
     except Exception as e:
         return f"⚠️ Explore search failed: {e}"
+
+
+# ---------------------------------------------------------------------------
+# General web search
+# ---------------------------------------------------------------------------
+
+def search_web(args: str) -> str:
+    """General Google web search — fallback for anything Maps-based tools miss."""
+    if not args.strip():
+        return "❌ Provide a search query."
+    try:
+        data = _search({"engine": "google", "q": args.strip(), "hl": "en", "num": 5})
+        if "error" in data:
+            return f"⚠️ Web search error: {data['error']}"
+        results = data.get("organic_results", [])
+        if not results:
+            return f"No web results found for: {args}"
+        lines = [f"🔍 *Web results for: {args}*\n"]
+        for r in results[:5]:
+            title   = r.get("title", "")
+            snippet = r.get("snippet", "")
+            link    = r.get("link", "")
+            lines.append(f"*{title}*\n{snippet}\n_{link}_\n")
+        return "\n".join(lines)
+    except RuntimeError as e:
+        return str(e)
+    except Exception as e:
+        return f"⚠️ Web search failed: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Weather (wttr.in — no API key required)
+# ---------------------------------------------------------------------------
+
+def search_weather(args: str) -> str:
+    """Current conditions + 3-day forecast for any city via wttr.in."""
+    location = args.strip()
+    if not location:
+        return "❌ Provide a city or location."
+    try:
+        resp = requests.get(
+            f"https://wttr.in/{requests.utils.quote(location)}",
+            params={"format": "j1"},
+            timeout=8,
+            headers={"User-Agent": "vacation-bot/1.0"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        current  = data["current_condition"][0]
+        temp_c   = current["temp_C"]
+        temp_f   = current["temp_F"]
+        desc     = current["weatherDesc"][0]["value"]
+        humidity = current["humidity"]
+        wind     = current["windspeedKmph"]
+
+        lines = [
+            f"🌤 *Weather in {location.title()}*\n",
+            f"Now: {desc}, {temp_c}°C / {temp_f}°F",
+            f"Humidity: {humidity}%  Wind: {wind} km/h\n",
+            "*3-Day Forecast:*",
+        ]
+        for label, forecast in zip(["Today", "Tomorrow", "Day 3"], data.get("weather", [])[:3]):
+            hi_c  = forecast["maxtempC"]
+            lo_c  = forecast["mintempC"]
+            hi_f  = forecast["maxtempF"]
+            lo_f  = forecast["mintempF"]
+            fdesc = forecast["hourly"][4]["weatherDesc"][0]["value"]
+            lines.append(f"  {label}: {fdesc}, {lo_c}–{hi_c}°C / {lo_f}–{hi_f}°F")
+
+        return "\n".join(lines)
+    except Exception as e:
+        return f"⚠️ Weather lookup failed: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Currency conversion (frankfurter.app — no API key required)
+# ---------------------------------------------------------------------------
+
+def convert_currency(args: str) -> str:
+    """Convert between currencies using ECB rates via frankfurter.app."""
+    import re
+    args = args.strip().upper()
+    m = re.match(r'^(?:([\d,\.]+)\s+)?([A-Z]{3})\s+TO\s+([A-Z]{3})$', args)
+    if not m:
+        return "❌ Format: `200 CHF to USD` or `EUR to GBP`"
+    amount_str, from_cur, to_cur = m.groups()
+    amount = float(amount_str.replace(",", "")) if amount_str else 1.0
+    try:
+        resp = requests.get(
+            "https://api.frankfurter.app/latest",
+            params={"amount": amount, "from": from_cur, "to": to_cur},
+            timeout=8,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        rate = data["rates"].get(to_cur)
+        if rate is None:
+            return f"❌ Unsupported currency: {to_cur}"
+        return (
+            f"💱 *Currency Conversion*\n"
+            f"{amount:,.2f} {from_cur} = *{rate:,.2f} {to_cur}*\n"
+            f"_Rate as of {data['date']} (European Central Bank)_"
+        )
+    except Exception as e:
+        return f"⚠️ Currency conversion failed: {e}"

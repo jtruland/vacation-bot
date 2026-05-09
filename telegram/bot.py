@@ -713,7 +713,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     _message_texts[(chat_id, message_id)] = text
     _evict_message_texts()
 
-    if not text.lower().startswith(TRIGGER_WORD.lower()):
+    is_reply_to_bot = bool(
+        message.reply_to_message
+        and message.reply_to_message.from_user
+        and message.reply_to_message.from_user.id == context.bot.id
+    )
+
+    if not text.lower().startswith(TRIGGER_WORD.lower()) and not is_reply_to_bot:
         return
 
     if chat_id not in _responded_ids:
