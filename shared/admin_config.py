@@ -17,7 +17,7 @@ load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
 
 logger = logging.getLogger(__name__)
 
-_EMPTY = {"allowed_chat_ids": [], "pending": {}}
+_EMPTY = {"allowed_chat_ids": [], "pending": {}, "group_names": {}}
 
 
 def _load() -> dict:
@@ -151,3 +151,24 @@ def rehome_chat(old_chat_id: str, new_chat_id: str) -> bool:
             logger.error("Failed to update dm_store during rehome: %s", e)
 
     return changed
+
+
+# ─── Group name store ──────────────────────────────────────────────────────────
+
+def set_group_name(chat_id: str, title: str) -> None:
+    """Persist the human-readable name of a group chat."""
+    cfg = _load()
+    cfg.setdefault("group_names", {})[str(chat_id)] = title
+    _save(cfg)
+
+
+def get_group_name(chat_id: str) -> str | None:
+    """Return the stored display name for a group, or None if not recorded."""
+    return _load().get("group_names", {}).get(str(chat_id))
+
+
+def resolve_group_by_name(name: str) -> str | None:
+    """Return the chat_id for a group name (case-insensitive). None if not found or ambiguous."""
+    names = _load().get("group_names", {})
+    matches = [cid for cid, t in names.items() if t.lower() == name.lower()]
+    return matches[0] if len(matches) == 1 else None

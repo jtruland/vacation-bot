@@ -1,5 +1,35 @@
 # Changelog
 
+## [Unreleased] — 2026-05-09 (build 4)
+
+### Added
+
+**Itinerary display (`!claude booked`)**
+- Rewritten `format_for_telegram` in `shared/bookings.py`: chronological day-by-day itinerary grouped by date. Each hotel contributes two events (check-in + check-out), flights show depart/arrive on separate lines when dates differ, rentals show pickup/return.
+- Bookings with no `start_date` are separated into a "⚠️ Needs Attention" section with pre-filled `!claude book edit` commands for quick date entry.
+
+**Direct booking manipulation commands**
+- `!claude book remove <id>` — delete a booking by its generated ID (`f001_3a7c` style). Works with optional `#trip` selector.
+- `!claude book edit <id> field=value ...` — update one or more fields directly without going through Claude. Editable fields: `title`, `start_date`, `end_date`, `confirmation`, `cost`, `notes`. Handles values with spaces (e.g. `notes=Breakfast included great view`). Works with optional `#trip` selector.
+
+**Incomplete-booking warnings after email save**
+- After `!claude book save`, any saved bookings missing `start_date` (or `end_date` for hotels) are listed with pre-filled `!claude book edit` fix commands.
+
+**Group names in owner DM commands**
+- Bot stores the Telegram group title in `admin_config.json` (`group_names` dict) on every group message.
+- Email scan pending DMs now use the group's human name in pre-filled commands (e.g. `My Family Trip` instead of `-1001234567890`).
+- Owner DM `book save` / `book skip` now accepts either the group name or numeric ID (backward-compatible). Split on `#` to parse group reference from trip name.
+- Files: `shared/admin_config.py` (new: `set_group_name`, `get_group_name`, `resolve_group_by_name`), `shared/pending_bookings.py` (`group_name` param), `telegram/bot.py`
+
+### Fixed
+
+**Email scanner HTML parsing**
+- Replaced naive `re.sub(r'<[^>]+>', ...)` with BeautifulSoup (`separator="\n"`, strip script/style/head). Preserves label/value adjacency in HTML table emails so Claude can reliably extract check-in/check-out dates.
+- Increased body cap from 8,000 to 12,000 chars.
+- Added date-label guidance to extraction prompt (e.g. "Check-in", "Arrival", "Pick-up date").
+- Added `logger.debug(...)` after extraction for per-email visibility in logs.
+- File: `shared/email_scanner.py`
+
 ## [Unreleased] — 2026-05-09 (build 3)
 
 ### Added

@@ -2,6 +2,7 @@ import asyncio
 import datetime
 import logging
 import os
+import re
 import sys
 import threading
 
@@ -28,8 +29,9 @@ from shared.pending_bookings import (
     set_pending, get_pending, clear_pending, has_pending,
     pick_pending, format_pending_for_telegram,
 )
-from shared.bookings import add_booking as _add_booking
+from shared.bookings import add_booking as _add_booking, get_bookings as _get_bookings, remove_booking as _remove_booking, update_booking as _update_booking
 import shared.admin_config as admin_config
+from shared.admin_config import set_group_name, get_group_name, resolve_group_by_name
 from shared.dm_router import (
     AmbiguousTripError,
     generate_dm_code, disable_dm_code,
@@ -190,6 +192,10 @@ async def process_message(message, context: ContextTypes.DEFAULT_TYPE, text: str
     if is_dm:
         return await _handle_dm(message, context, body, lower, chat_id, sender_id)
 
+    # ── Persist group name for owner DM commands ────────────────────────────────
+    if message.chat.title:
+        set_group_name(chat_id, message.chat.title)
+
     # ── DM activity summary (group only) ────────────────────────────────────────
     pending_dm = pop_dm_activity(chat_id)
     if pending_dm:
@@ -280,11 +286,18 @@ async def _handle_dm(message, context, body: str, lower: str, dm_chat_id: str, s
     if is_owner and (lower.startswith("book save") or lower.startswith("book skip")):
         cmd = "book save" if lower.startswith("book save") else "book skip"
         args = body[len(cmd):].strip()
-        parts = args.split(None, 1)
-        if parts and not parts[0].startswith("#"):
-            target_chat_id = parts[0]
-            rest = parts[1] if len(parts) > 1 else ""
-            trip_selector, remaining = parse_trip_selector(rest)
+        if "#" in args:
+            group_ref, rest = args.split("#", 1)
+            group_ref = group_ref.strip()
+            # Resolve: numeric ID (backward compat) or human name
+            if group_ref.lstrip("-").isdigit():
+                target_chat_id = group_ref
+            else:
+                target_chat_id = resolve_group_by_name(group_ref)
+                if not target_chat_id:
+                    await message.reply_text(f'❌ No group named "{group_ref}" found.', parse_mode="Markdown")
+                    return
+            trip_selector, remaining = parse_trip_selector(rest.strip())
             if trip_selector:
                 reconstructed = f"{cmd} {remaining}".strip() if remaining else cmd
                 await _process_group_message(
@@ -293,7 +306,7 @@ async def _handle_dm(message, context, body: str, lower: str, dm_chat_id: str, s
                 )
                 return
         await message.reply_text(
-            f"Usage: `!claude {cmd} <group_chat_id> #<trip> [all|1 3]`",
+            f"Usage: `!claude {cmd} <group name> #<trip> [all|1 3]`",
             parse_mode="Markdown"
         )
         return
@@ -553,7 +566,12 @@ async def _process_group_message(message, context, body: str, lower: str, chat_i
             return
         set_pending(chat_id, trip_name, candidates)
         if BOT_OWNER_ID:
-            text = format_pending_for_telegram(chat_id, trip_name, owner_context=(chat_id, trip_name))
+            gname = get_group_name(chat_id)
+            text = format_pending_for_telegram(
+                chat_id, trip_name,
+                owner_context=(chat_id, trip_name),
+                group_name=gname,
+            )
             for chunk in chunk_message(text):
                 try:
                     await context.bot.send_message(
@@ -603,6 +621,25 @@ async def _process_group_message(message, context, body: str, lower: str, chat_i
             if is_dm:
                 log_dm_activity(chat_id, trip_name, f"Booking saved: {title}")
         lines.append("\nUse `!claude booked` to see all confirmed bookings.")
+        # Flag any saved bookings that are missing dates
+        incomplete_warnings = []
+        for bid, title, btype in saved:
+            saved_b = next((b for b in _get_bookings(chat_id, trip_name) if b["id"] == bid), None)
+            if saved_b:
+                missing = []
+                if not saved_b.get("start_date"):
+                    missing.append("start_date")
+                if btype == "hotel" and not saved_b.get("end_date"):
+                    missing.append("end_date")
+                if missing:
+                    miss_str = " + ".join(missing)
+                    incomplete_warnings.append(
+                        f"  {icons.get(btype, '📌')} {title} `{bid}` — missing {miss_str}\n"
+                        f"  → `!claude book edit {bid} {' '.join(f + '=YYYY-MM-DD' for f in missing)}`"
+                    )
+        if incomplete_warnings:
+            lines.append("\n⚠️ *These bookings need dates:*")
+            lines.extend(incomplete_warnings)
         await send_chunked(message, "\n".join(lines))
         if is_dm:
             group_lines = [f"✅ *{len(saved)} booking(s) added to {trip_name}:*"]
@@ -632,6 +669,68 @@ async def _process_group_message(message, context, body: str, lower: str, chat_i
             mark_seen(chat_id, email_ids)
         clear_pending(chat_id, trip_name)
         await message.reply_text("🗑️ Pending bookings discarded. They won't appear in future scans.")
+        return
+
+    if lower.startswith("book remove"):
+        remainder = body[len("book remove"):].strip()
+        trip_selector, remainder = parse_trip_selector(remainder)
+        trip_name = forced_trip or trip_selector or get_default_trip(chat_id)
+        booking_id = remainder.strip()
+        if not trip_name:
+            await message.reply_text("No default trip set.")
+            return
+        if not booking_id:
+            await message.reply_text("❌ Usage: `!claude book remove <id>`", parse_mode="Markdown")
+            return
+        if _remove_booking(chat_id, trip_name, booking_id):
+            await message.reply_text(f"🗑️ Booking `{booking_id}` removed from *{trip_name}*.", parse_mode="Markdown")
+        else:
+            await message.reply_text(f"❌ No booking `{booking_id}` found in *{trip_name}*. Use `!claude booked` to see IDs.", parse_mode="Markdown")
+        return
+
+    _EDITABLE = {"title", "start_date", "end_date", "confirmation", "cost", "notes"}
+    if lower.startswith("book edit"):
+        remainder = body[len("book edit"):].strip()
+        trip_selector, remainder = parse_trip_selector(remainder)
+        trip_name = forced_trip or trip_selector or get_default_trip(chat_id)
+        if not trip_name:
+            await message.reply_text("No default trip set.")
+            return
+        parts = remainder.split(None, 1)
+        if len(parts) < 2:
+            await message.reply_text(
+                "❌ Usage: `!claude book edit <id> field=value ...`\n"
+                "Editable fields: `title start_date end_date confirmation cost notes`",
+                parse_mode="Markdown"
+            )
+            return
+        booking_id, fields_str = parts[0], parts[1]
+        pat = "|".join(sorted(_EDITABLE, key=len, reverse=True))
+        updates: dict = {}
+        error = None
+        for m in re.finditer(rf"({pat})=(.+?)(?=\s+(?:{pat})=|$)", fields_str, re.IGNORECASE):
+            key, val = m.group(1).lower(), m.group(2).strip()
+            if key == "cost":
+                try:
+                    val = float(val)
+                except ValueError:
+                    error = "❌ `cost` must be a number."
+                    break
+            updates[key] = val
+        if error:
+            await message.reply_text(error, parse_mode="Markdown")
+            return
+        if not updates:
+            await message.reply_text(
+                "❌ No valid field=value pairs found.\nEditable fields: `title start_date end_date confirmation cost notes`",
+                parse_mode="Markdown"
+            )
+            return
+        if _update_booking(chat_id, trip_name, booking_id, updates):
+            changed = " ".join(f"`{k}`" for k in updates)
+            await message.reply_text(f"✅ Booking `{booking_id}` updated: {changed}.", parse_mode="Markdown")
+        else:
+            await message.reply_text(f"❌ No booking `{booking_id}` found in *{trip_name}*.", parse_mode="Markdown")
         return
 
     search_commands = {
@@ -736,7 +835,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         or any(lower.startswith(p) for p in (
             "trip new ", "trip default ", "trip delete ",
             "reset ", "summarize ", "booked ",
-            "book save ", "book skip ",
+            "book save ", "book skip ", "book remove ", "book edit ",
             "flights ", "hotels ", "rentals ",
             "places ", "reviews ", "events ", "explore ",
         ))
@@ -818,7 +917,12 @@ async def _daily_email_scan(context: ContextTypes.DEFAULT_TYPE) -> None:
             set_pending(chat_id, trip_name, candidates)
             header = f"📬 *Daily booking scan — {len(candidates)} new item(s) found for {trip_name}!*\n\n"
             if BOT_OWNER_ID:
-                text = header + format_pending_for_telegram(chat_id, trip_name, owner_context=(chat_id, trip_name))
+                gname = get_group_name(chat_id)
+                text = header + format_pending_for_telegram(
+                    chat_id, trip_name,
+                    owner_context=(chat_id, trip_name),
+                    group_name=gname,
+                )
                 dest = int(BOT_OWNER_ID)
             else:
                 text = header + format_pending_for_telegram(chat_id, trip_name)

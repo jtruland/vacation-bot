@@ -166,10 +166,13 @@ Type `!claude help` in the Telegram group for the full reference. Quick overview
 | `!claude trip default <name>` | Set default trip |
 | `!claude <question>` | Ask Claude (searches live data as needed) |
 | `!claude #tripname <question>` | Ask about a specific trip |
-| `!claude booked` | Show confirmed bookings |
+| `!claude booked` | Show confirmed bookings as a day-by-day itinerary |
 | `!claude scan email` | Scan Gmail for booking confirmations |
 | `!claude book save all` | Save all found bookings |
+| `!claude book save 1 3` | Save specific found bookings by number |
 | `!claude book skip` | Discard found bookings without saving |
+| `!claude book remove <id>` | Remove a booking by ID |
+| `!claude book edit <id> field=value ...` | Edit booking fields (title, start_date, end_date, confirmation, cost, notes) |
 | `!claude reset` | Clear in-memory conversation history |
 | `!claude summarize` | Save a planning summary to disk |
 | `!claude flights JFK Rome 2026-07-15 2026-07-25 2` | Direct flight search |

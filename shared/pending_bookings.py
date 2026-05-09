@@ -78,11 +78,13 @@ def format_pending_for_telegram(
     chat_id: str,
     trip_name: str,
     owner_context: tuple[str, str] | None = None,
+    group_name: str | None = None,
 ) -> str:
     """
     Numbered list of pending bookings for display in Telegram.
     When owner_context=(group_chat_id, trip_name) is provided, the save/skip
     commands include the group context so the bot owner can act from their DM.
+    group_name is used in pre-filled commands instead of the raw numeric chat_id.
     """
     items = _load(chat_id, trip_name)
     if not items:
@@ -116,11 +118,12 @@ def format_pending_for_telegram(
 
     if owner_context:
         oc_chat_id, oc_trip = owner_context
+        ref = group_name or oc_chat_id  # human name when available, numeric ID as fallback
         lines.append(
             "Reply with:\n"
-            f"  `!claude book save {oc_chat_id} #{oc_trip} all` — save all\n"
-            f"  `!claude book save {oc_chat_id} #{oc_trip} 1 3` — save specific items\n"
-            f"  `!claude book skip {oc_chat_id} #{oc_trip}` — discard without saving"
+            f"  `!claude book save {ref} #{oc_trip} all` — save all\n"
+            f"  `!claude book save {ref} #{oc_trip} 1 3` — save specific items\n"
+            f"  `!claude book skip {ref} #{oc_trip}` — discard without saving"
         )
     else:
         lines.append(

@@ -168,7 +168,7 @@ Group members can DM the bot to work on shared trips privately, without posting 
 - One JSON file per trip: `data/{safe_chat_id}/{trip_name}_bookings.json`
 - `add_booking` auto-generates ID: `{type[0]}{count:03d}_{uuid4[:4]}` (e.g., `f001_3a7c`)
 - `format_for_prompt` → compact string injected into system prompt on **every** Claude call via `_build_system_prompt()`; any exception here breaks all Claude responses for that chat
-- `format_for_telegram` → Markdown for display in chat
+- `format_for_telegram` → chronological day-by-day itinerary; bookings with no `start_date` appear in a "Needs Attention" section with pre-filled edit commands
 - Booking types: `flight`, `hotel`, `rental`, `activity`
 - Sort key uses `x.get("start_date") or ""` — `dict.get(key, default)` does NOT fall back to the default when the key exists with an explicit `null` value, so use `or ""` to handle null dates
 
@@ -187,16 +187,24 @@ Group members can DM the bot to work on shared trips privately, without posting 
 - Threading model: SSE reader runs in a daemon thread; result delivered to main thread via `Queue`; endpoints communicated via `threading.Event`
 - Gateway-side change required: add an API key auth path on `mcp.bitz.dev` that accepts `Bearer <MCP_API_KEY>` alongside the existing Google OAuth flow
 
+### `shared/admin_config.py`
+- `set_group_name(chat_id, title)` / `get_group_name(chat_id)` / `resolve_group_by_name(name)` — persist and look up human-readable group names, stored in `group_names: {}` in admin_config.json
+- `resolve_group_by_name` is case-insensitive; returns `None` if not found or if ambiguous (multiple groups share the same name)
+- Group name is persisted on every group message in `process_message` via `set_group_name(chat_id, message.chat.title)`
+
 ### `shared/email_scanner.py`
 - Gmail IMAP with `X-GM-RAW` for full Gmail search syntax
 - `after:` date uses Gmail format (`YYYY/MM/DD`); subject terms use parentheses not inner quotes
 - Each email → Claude Haiku → structured JSON (or `{"is_booking": false}`)
+- HTML body: parsed with BeautifulSoup (`separator="\n"`) to preserve label/value context; script/style/head tags removed before extraction. Naive `re.sub(r'<[^>]+>', ...)` would lose table structure that makes check-in/check-out dates readable.
+- Body cap: 12,000 chars (BeautifulSoup output is denser than raw HTML)
+- Debug logging: `logger.debug(...)` after each `json.loads` in `extract_booking` — check `telegram.log` with `DEBUG` level to see what Claude extracted
 - Dedup: `scanned_email_ids.json` tracks all processed email IDs. `mark_seen(chat_id, ids)` is called after save **and** skip — and after a partial save, it is called with **all** pending IDs (not just the saved subset), so un-saved items don't resurface on the next scan.
 - `scan_for_bookings(chat_id, trip_name)` is the main entry point
 
 ### `shared/pending_bookings.py`
 - Temporary store for email-scan results awaiting owner confirmation: `data/{safe_chat_id}/{trip_name}_pending.json`
-- `format_pending_for_telegram(chat_id, trip_name, owner_context=None)` — pass `owner_context=(chat_id, trip_name)` when sending to the owner's DM; this rewrites the save/skip commands at the bottom to include the group chat_id and trip prefix so the owner can act from DM.
+- `format_pending_for_telegram(chat_id, trip_name, owner_context=None, group_name=None)` — pass `owner_context=(chat_id, trip_name)` when sending to the owner's DM. If `group_name` is provided, it is used in pre-filled commands instead of the raw numeric chat_id (e.g. `"My Family Trip"` instead of `-1001234567890`).
 
 ---
 
@@ -232,11 +240,13 @@ pgrep -f "telegram/bot.py" | wc -l                   # should be 1
 | `!claude trip delete <name>` | Delete trip (admin only) |
 | `!claude reset [#trip]` | Clear in-memory history |
 | `!claude summarize [#trip]` | Save planning summary to disk |
-| `!claude booked [#trip]` | Show confirmed bookings |
+| `!claude booked [#trip]` | Show confirmed bookings as a day-by-day itinerary |
 | `!claude scan email [#trip]` | Scan Gmail; results go to owner DM (silent in group) |
 | `!claude book save all` | Save all pending email finds (group fallback when no owner) |
 | `!claude book save 1 3` | Save specific pending items (group fallback) |
 | `!claude book skip` | Discard pending without saving (group fallback) |
+| `!claude book remove <id>` | Remove a booking by ID |
+| `!claude book edit <id> field=value ...` | Edit booking fields: `title start_date end_date confirmation cost notes` |
 | `!claude flights <args>` | Direct flight search |
 | `!claude hotels <args>` | Direct hotel search |
 | `!claude rentals <args>` | Direct rental search |
@@ -255,8 +265,8 @@ pgrep -f "telegram/bot.py" | wc -l                   # should be 1
 | `!claude admin deny <id>` | (Owner DM) Remove from pending |
 | `!claude admin revoke <id>` | (Owner DM) Remove from allowed + leave |
 | `!claude admin rehome <old> <new>` | (Owner DM) Manual chat ID migration |
-| `!claude book save <chat_id> #<trip> [all\|1 3]` | (Owner DM) Save pending email finds for a group/trip |
-| `!claude book skip <chat_id> #<trip>` | (Owner DM) Discard pending email finds for a group/trip |
+| `!claude book save <group name> #<trip> [all\|1 3]` | (Owner DM) Save pending email finds — group name or numeric ID |
+| `!claude book skip <group name> #<trip>` | (Owner DM) Discard pending email finds — group name or numeric ID |
 
 ---
 

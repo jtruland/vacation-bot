@@ -185,83 +185,100 @@ def format_for_prompt(chat_id: str, trip_name: str) -> str:
 
 def format_for_telegram(chat_id: str, trip_name: str) -> str:
     """
-    Returns a Markdown-formatted bookings list for sending to Telegram.
+    Returns a chronological itinerary for sending to Telegram.
+    Bookings with no start_date are separated into a 'Needs Attention' section.
     """
+    from itertools import groupby
+
     bookings = _load(chat_id, trip_name)
     if not bookings:
         return f"No confirmed bookings yet for *{trip_name}*."
 
-    sorted_b = sorted(bookings, key=lambda x: (
-        BOOKING_ORDER.get(x.get("type"), 9),
-        x.get("start_date") or ""
-    ))
+    events = []      # (date_str, sort_key, line)
+    incomplete = []  # bookings missing itinerary-critical fields
 
-    lines = [f"📋 *Confirmed Bookings — {trip_name}*\n"]
-    total = 0.0
-
-    for b in sorted_b:
-        btype  = b.get("type", "other")
-        icon   = BOOKING_ICONS.get(btype, "📌")
-        title  = b.get("title", "Unnamed")
-
-        lines.append(f"{icon} *{title}*")
-        lines.append(f"  `{b['id']}`")
-
-        start = b.get("start_date", "")
-        end   = b.get("end_date", "")
-        if start and end and end != start:
-            lines.append(f"  📅 {start} → {end}")
-        elif start:
-            lines.append(f"  📅 {start}")
-
-        if b.get("confirmation"):
-            lines.append(f"  🔖 `{b['confirmation']}`")
-
-        cost = b.get("cost")
-        if cost is not None:
-            currency = b.get("currency", "USD")
-            lines.append(f"  💰 {currency} {float(cost):,.2f}")
-            try:
-                total += float(cost)
-            except (ValueError, TypeError):
-                pass
-
+    for b in bookings:
+        btype   = b.get("type")
+        bid     = b["id"]
+        icon    = BOOKING_ICONS.get(btype, "📌")
+        title   = b.get("title", "Unnamed")
+        start   = b.get("start_date") or ""
+        end     = b.get("end_date") or ""
         details = b.get("details") or {}
+
+        if not start:
+            incomplete.append(b)
+            continue
+
+        # Build primary event line
         if btype == "flight":
-            parts = [details.get("airline", ""), details.get("flight_number", "")]
-            desc = " ".join(p for p in parts if p)
-            if desc:
-                lines.append(f"  ✈️ {desc}")
-            if details.get("departure_airport") and details.get("arrival_airport"):
-                lines.append(f"  {details['departure_airport']} → {details['arrival_airport']}")
-            if details.get("passengers"):
-                lines.append(f"  👥 {details['passengers']} pax")
+            dep = details.get("departure_airport", "")
+            arr = details.get("arrival_airport", "")
+            airline = " ".join(filter(None, [details.get("airline", ""), details.get("flight_number", "")]))
+            time_s = details.get("departure_time", "")
+            time_str = f"{time_s} " if time_s else ""
+            route = f"{dep} → {arr}" if dep and arr else title
+            label = f"✈️ Departs {time_str}{route}" + (f" — {airline}" if airline else "")
         elif btype == "hotel":
-            if details.get("rooms"):
-                lines.append(f"  🛏 {details['rooms']} room(s)")
-            if details.get("guests"):
-                lines.append(f"  👥 {details['guests']} guest(s)")
+            label = f"🏨 Check-in: {title}"
         elif btype == "rental":
-            parts = [details.get("company", ""), details.get("vehicle", "")]
-            desc = " · ".join(p for p in parts if p)
-            if desc:
-                lines.append(f"  🚗 {desc}")
-            if details.get("pickup_location"):
-                lines.append(f"  📍 Pickup: {details['pickup_location']}")
-        elif btype == "activity":
-            if details.get("venue"):
-                lines.append(f"  📍 {details['venue']}")
-            if details.get("time"):
-                lines.append(f"  🕐 {details['time']}")
-            if details.get("participants"):
-                lines.append(f"  👥 {details['participants']} participant(s)")
+            label = f"🚗 Pickup: {title}"
+        else:
+            time_s = details.get("time", "")
+            label = f"{icon} {title}" + (f", {time_s}" if time_s else "")
 
-        if b.get("notes"):
-            lines.append(f"  📝 _{b['notes']}_")
+        events.append((start, start + "a", f"{label}   `{bid}`"))
 
-        lines.append("")  # spacing between entries
+        # Secondary event (check-out / return / arrival)
+        if end and end != start:
+            if btype == "hotel":
+                events.append((end, end + "z", f"🏨 Check-out: {title}   ({bid})"))
+            elif btype == "rental":
+                events.append((end, end + "z", f"🚗 Return: {title}   ({bid})"))
+            elif btype == "flight":
+                arr_time = details.get("arrival_time", "")
+                arr_time_str = f"{arr_time} " if arr_time else ""
+                arr_label = f"✈️ Arrives {arr_time_str}{details.get('arrival_airport', '') or title}"
+                events.append((end, end + "z", f"{arr_label}   ({bid})"))
 
+    events.sort(key=lambda e: e[1])
+    lines = [f"📋 *Itinerary — {trip_name}*\n"]
+
+    for date_str, group in groupby(events, key=lambda e: e[0]):
+        try:
+            d = datetime.strptime(date_str, "%Y-%m-%d")
+            # %-d works on macOS/Linux (no leading zero); replace " 0" as fallback
+            try:
+                header = d.strftime("*%a, %-d %b %Y*")
+            except ValueError:
+                header = d.strftime("*%a, %d %b %Y*").replace(" 0", " ")
+        except ValueError:
+            header = f"*{date_str}*"
+        lines.append(header)
+        for _, _, event_line in group:
+            lines.append(f"  {event_line}")
+        lines.append("")
+
+    total = sum(float(b.get("cost") or 0) for b in bookings if b.get("cost"))
     if total > 0:
         lines.append(f"*Total booked: ${total:,.2f}*")
+
+    if incomplete:
+        lines.append(f"\n---\n⚠️ *{len(incomplete)} booking(s) need attention:*")
+        for b in incomplete:
+            btype = b.get("type", "")
+            bid   = b["id"]
+            icon  = BOOKING_ICONS.get(btype, "📌")
+            missing = []
+            if not b.get("start_date"):
+                missing.append("start_date")
+            if btype == "hotel" and not b.get("end_date"):
+                missing.append("end_date")
+            miss_str = " + ".join(missing) if missing else "dates"
+            lines.append(f"  {icon} {b.get('title', 'Unnamed')}   `{bid}` — missing {miss_str}")
+            if btype == "hotel":
+                lines.append(f"  → `!claude book edit {bid} start_date=YYYY-MM-DD end_date=YYYY-MM-DD`")
+            else:
+                lines.append(f"  → `!claude book edit {bid} start_date=YYYY-MM-DD`")
 
     return "\n".join(lines)

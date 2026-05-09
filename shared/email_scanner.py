@@ -23,6 +23,7 @@ from email.header import decode_header as _decode_header
 
 import logging
 import anthropic
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from shared.paths import chat_dir
 
@@ -125,16 +126,18 @@ def _get_body(msg) -> str:
                     if payload:
                         charset = part.get_content_charset() or "utf-8"
                         raw_html = payload.decode(charset, errors="replace")
-                        # Strip tags for Claude
-                        body = re.sub(r'<[^>]+>', ' ', raw_html)
-                        body = re.sub(r'\s+', ' ', body).strip()
+                        soup = BeautifulSoup(raw_html, "html.parser")
+                        for tag in soup(["script", "style", "head"]):
+                            tag.decompose()
+                        body = soup.get_text(separator="\n", strip=True)
+                        body = re.sub(r'\n{3,}', '\n\n', body).strip()
                         break
     else:
         payload = msg.get_payload(decode=True)
         if payload:
             charset = msg.get_content_charset() or "utf-8"
             body = payload.decode(charset, errors="replace")
-    return body[:8000]  # cap at 8k chars — plenty for Claude
+    return body[:12000]  # cap at 12k chars
 
 
 def _connect_gmail() -> imaplib.IMAP4_SSL:
@@ -247,6 +250,14 @@ If it IS a booking confirmation, respond with ONLY valid JSON in this exact shap
   }
 }
 
+When extracting dates, look for these label patterns:
+- Hotels: "Check-in", "Arrival", "Check-out", "Departure date"
+- Flights: "Departs", "Arrives", "Departure", "Return"
+- Rentals: "Pick-up date", "Return date", "Pick-up", "Drop-off"
+- Activities: "Date", "Event date", "Tour date"
+Dates appear in many formats (July 15 2026 / 15/07/2026 / Tue 15 Jul 2026).
+Always convert to YYYY-MM-DD. If only month+year with no day, use null.
+
 If it is NOT a booking confirmation (e.g. marketing email, itinerary suggestion, price alert), respond with ONLY:
 {"is_booking": false}
 
@@ -289,6 +300,8 @@ def extract_booking(email: dict) -> dict | None:
         data = json.loads(raw)
     except json.JSONDecodeError:
         return None
+
+    logger.debug("Extracted from '%s': %s", email["subject"], json.dumps(data, default=str))
 
     if not data.get("is_booking"):
         return None
