@@ -149,10 +149,11 @@ def search_flights(args: str) -> str:
 # Hotels
 # ---------------------------------------------------------------------------
 
-def _format_hotels(results: list, city: str, checkin: str, checkout: str) -> str:
+def _format_hotels(results: list, city: str, checkin: str, checkout: str) -> tuple[str, list[str]]:
     if not results:
-        return f"No hotels found in {city} for those dates."
+        return f"No hotels found in {city} for those dates.", []
     lines = [f"🏨 *Hotels in {city}* ({checkin} → {checkout}):\n"]
+    images = []
     for i, h in enumerate(results[:5], 1):
         name = h.get("name", "Unknown")
         rating = h.get("overall_rating", "")
@@ -164,8 +165,11 @@ def _format_hotels(results: list, city: str, checkin: str, checkout: str) -> str
         stars_str = f" | {stars}" if stars else ""
         total_str = f" _(~{total} total)_" if total else ""
         lines.append(f"{i}. *{name}*{stars_str}{rating_str}\n   {price}/night{total_str}")
+        thumb = ((h.get("images") or [{}])[0]).get("thumbnail", "")
+        if thumb:
+            images.append(thumb)
     lines.append("\n_Verify and book on Google Hotels or the hotel's site._")
-    return "\n".join(lines)
+    return "\n".join(lines), images
 
 
 def search_hotels(args: str) -> str:
@@ -242,6 +246,7 @@ def search_rentals(args: str) -> str:
             return f"No vacation rentals found in {city} for those dates."
 
         lines = [f"🏠 *Vacation Rentals in {city.title()}* ({checkin} → {checkout}):\n"]
+        images = []
         for i, r in enumerate(rentals[:5], 1):
             name = r.get("name", "Unknown")
             rating = r.get("overall_rating", "")
@@ -253,9 +258,11 @@ def search_rentals(args: str) -> str:
             type_str = f" | {prop_type}" if prop_type else ""
             total_str = f" _(~${total} total)_" if total else ""
             lines.append(f"{i}. *{name}*{type_str}{rating_str}\n   ${price}/night{total_str}")
+            if r.get("thumbnail"):
+                images.append(r["thumbnail"])
 
         lines.append("\n_Prices are estimates. Book directly on the listing platform._")
-        return "\n".join(lines)
+        return "\n".join(lines), images
     except RuntimeError as e:
         return str(e)
     except Exception as e:
@@ -291,6 +298,7 @@ def search_places(args: str) -> str:
             return f"No places found for \"{args.strip()}\"."
 
         lines = [f"📍 *Places: {args.strip()}*\n"]
+        images = []
         for i, p in enumerate(places[:5], 1):
             name = p.get("title", "Unknown")
             rating = p.get("rating", "")
@@ -309,9 +317,11 @@ def search_places(args: str) -> str:
             lines.append(
                 f"{i}. *{name}*{category_str}{rating_str}{price_str}{hours_str}{addr_str}"
             )
+            if p.get("thumbnail"):
+                images.append(p["thumbnail"])
 
         lines.append("\n_Results from Google Maps._")
-        return "\n".join(lines)
+        return "\n".join(lines), images
     except RuntimeError as e:
         return str(e)
     except Exception as e:

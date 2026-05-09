@@ -5,11 +5,13 @@ import os
 import re
 import sys
 import threading
+import uuid
 
-from telegram import Update
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
 from telegram.constants import ParseMode
 from telegram.ext import (
-    Application, ChatMemberHandler, ContextTypes, MessageHandler, filters,
+    Application, CallbackQueryHandler, ChatMemberHandler, ContextTypes,
+    MessageHandler, filters,
 )
 from dotenv import load_dotenv
 
@@ -94,6 +96,59 @@ def _evict_responded_ids(chat_id: str) -> None:
     if ids and len(ids) > _MAX_RESPONDED_PER_CHAT:
         to_remove = sorted(ids)[:len(ids) - _MAX_RESPONDED_PER_CHAT]
         ids.difference_update(to_remove)
+
+# ─── Pending image store ───────────────────────────────────────────────────────
+
+_PENDING_IMAGES: dict[str, list[str]] = {}
+_MAX_PENDING_IMAGES = 100
+
+
+def _store_images(urls: list[str]) -> str:
+    key = uuid.uuid4().hex[:12]
+    _PENDING_IMAGES[key] = urls
+    if len(_PENDING_IMAGES) > _MAX_PENDING_IMAGES:
+        oldest = next(iter(_PENDING_IMAGES))
+        _PENDING_IMAGES.pop(oldest, None)
+    return key
+
+
+async def send_images(chat_id_int: int, context: ContextTypes.DEFAULT_TYPE, urls: list[str]) -> None:
+    valid = [u for u in urls if u][:10]
+    if not valid:
+        return
+    try:
+        if len(valid) == 1:
+            await context.bot.send_photo(chat_id=chat_id_int, photo=valid[0])
+        else:
+            media = [InputMediaPhoto(media=url) for url in valid]
+            await context.bot.send_media_group(chat_id=chat_id_int, media=media)
+    except Exception as e:
+        logger.warning("Failed to send images: %s", e)
+
+
+async def offer_images(message, images: list[str]) -> None:
+    if not images:
+        return
+    key = _store_images(images)
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("📷 Show photos", callback_data=f"photos:{key}")
+    ]])
+    await message.reply_text("Photos available — tap to view.", reply_markup=keyboard)
+
+
+async def handle_photo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    if not query.data or not query.data.startswith("photos:"):
+        return
+    key = query.data[len("photos:"):]
+    images = _PENDING_IMAGES.pop(key, [])
+    if images:
+        await send_images(query.message.chat_id, context, images)
+        await query.edit_message_text("📷 Photos sent.")
+    else:
+        await query.edit_message_text("⚠️ Photos no longer available (session expired).")
+
 
 HELP_TEXT = (
     "🗺️ *Vacation Planning Bot*\n\n"
@@ -752,7 +807,9 @@ async def _process_group_message(message, context, body: str, lower: str, chat_i
                 logger.error("Search error (%s): %s", cmd, e)
                 await message.reply_text(f"❌ Search failed: {e}")
                 return
-            await send_chunked(message, result)
+            text, images = result if isinstance(result, tuple) else (result, [])
+            await send_chunked(message, text)
+            await offer_images(message, images)
             return
 
     trip_selector, question = parse_trip_selector(body)
@@ -781,9 +838,10 @@ async def _process_group_message(message, context, body: str, lower: str, chat_i
 
     await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
     try:
-        response = ask_claude(question, chat_id, trip_name)
+        response, images = ask_claude(question, chat_id, trip_name)
         header = f"_{trip_name}_\n" if trip_selector and not forced_trip else ""
         await send_chunked(message, header + response)
+        await offer_images(message, images)
         if is_dm:
             preview = question[:60] + ("…" if len(question) > 60 else "")
             log_dm_activity(chat_id, trip_name, f"Asked: {preview}")
@@ -986,6 +1044,7 @@ def _setup_handlers(app: Application) -> None:
     app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE & filters.TEXT, handle_edited_message))
     app.add_handler(ChatMemberHandler(handle_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.StatusUpdate.MIGRATE, handle_migration))
+    app.add_handler(CallbackQueryHandler(handle_photo_callback, pattern=r"^photos:"))
     app.job_queue.run_daily(_daily_email_scan, time=datetime.time(hour=8, minute=0))
     logger.info("Daily email scan scheduled at 08:00")
 

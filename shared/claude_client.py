@@ -400,7 +400,7 @@ _SEARCH_FUNCTIONS = {
 }
 
 
-def _execute_tool(name: str, tool_input: dict, chat_id: str = "", trip_name: str = "") -> str:
+def _execute_tool(name: str, tool_input: dict, chat_id: str = "", trip_name: str = "", _images_out: list | None = None) -> str:
     """Execute a tool call and return the result as a string."""
 
     # ── Booking tools ─────────────────────────────────────────────────────────
@@ -460,7 +460,13 @@ def _execute_tool(name: str, tool_input: dict, chat_id: str = "", trip_name: str
     fn = _SEARCH_FUNCTIONS.get(name)
     if fn:
         try:
-            return fn(tool_input.get("args", ""))
+            result = fn(tool_input.get("args", ""))
+            if isinstance(result, tuple):
+                text, imgs = result
+                if _images_out is not None:
+                    _images_out.extend(imgs)
+                return text
+            return result
         except Exception as e:
             return f"Tool error: {e}"
 
@@ -638,11 +644,13 @@ def _build_system_prompt(chat_id: str, trip_name: str) -> str:
 # Conversation
 # ---------------------------------------------------------------------------
 
-def ask_claude(message: str, chat_id: str, trip_name: str) -> str:
+def ask_claude(message: str, chat_id: str, trip_name: str) -> tuple[str, list[str]]:
     """Send a message to Claude with conversation history, tool access, and URL fetching.
 
     Claude will autonomously decide when to call search tools based on the question.
     Supports multi-turn tool use (Claude can call multiple tools per response).
+    Returns (reply_text, image_urls) where image_urls is populated when search tools
+    that return images were called.
     """
     if chat_id not in _histories:
         _histories[chat_id] = {}
@@ -654,6 +662,7 @@ def ask_claude(message: str, chat_id: str, trip_name: str) -> str:
     url_context = build_url_context(urls) if urls else ""
     full_message = url_context + message if url_context else message
 
+    collected_images: list[str] = []
     history = _histories[chat_id][trip_name]
     history.append({"role": "user", "content": full_message})
 
@@ -681,7 +690,7 @@ def ask_claude(message: str, chat_id: str, trip_name: str) -> str:
                      if hasattr(block, "text")), ""
                 )
                 history.append({"role": "assistant", "content": response.content})
-                return reply
+                return reply, collected_images[:10]
 
             # Claude wants to use one or more tools
             if response.stop_reason == "tool_use":
@@ -693,6 +702,7 @@ def ask_claude(message: str, chat_id: str, trip_name: str) -> str:
                         result = _execute_tool(
                             block.name, block.input,
                             chat_id=chat_id, trip_name=trip_name,
+                            _images_out=collected_images,
                         )
                         tool_results.append({
                             "type": "tool_result",
@@ -709,11 +719,11 @@ def ask_claude(message: str, chat_id: str, trip_name: str) -> str:
                      if hasattr(block, "text")), "I wasn't able to generate a response."
                 )
                 history.append({"role": "assistant", "content": response.content})
-                return reply
+                return reply, collected_images[:10]
 
         # Exhausted iteration limit
         logger.warning("Tool iteration limit (%d) reached for %s/%s", MAX_TOOL_ITERATIONS, chat_id, trip_name)
-        return "⚠️ I got a bit stuck working through that. Could you try rephrasing your question?"
+        return "⚠️ I got a bit stuck working through that. Could you try rephrasing your question?", []
 
     except anthropic.AuthenticationError:
         history.pop()
