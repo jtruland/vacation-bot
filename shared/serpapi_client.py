@@ -394,57 +394,74 @@ def search_reviews(args: str) -> str:
 # ---------------------------------------------------------------------------
 
 def search_events(args: str) -> str:
-    """!claude events <city> [date] — e.g. 'Rome' or 'Rome 2026-07-15'"""
-    parts = args.strip().split()
-    if not parts:
+    """!claude events <city/region> [start_date] [end_date]
+    e.g. 'Rome', 'Florence 2026-07-15', 'Lucerne Switzerland 2026-12-1 2026-12-4'
+    """
+    tokens = args.strip().split()
+    if not tokens:
         return (
-            "❌ Format: `!claude events <city> [date]`\n"
+            "❌ Format: `!claude events <city/region> [start_date] [end_date]`\n"
             "Examples:\n"
             "`!claude events Rome`\n"
-            "`!claude events Florence 2026-07-15`"
+            "`!claude events Florence 2026-07-15`\n"
+            "`!claude events Lucerne Switzerland 2026-12-1 2026-12-4`"
         )
-    city = parts[0]
-    date_filter = None
-    if len(parts) > 1:
+
+    # Peel date tokens from the right; everything remaining is the location
+    dates = []
+    city_tokens = list(tokens)
+    while city_tokens:
         try:
-            date_filter = _parse_date(" ".join(parts[1:]))
+            dates.insert(0, _parse_date(city_tokens[-1]))
+            city_tokens.pop()
         except ValueError:
-            pass  # treat as part of the city name
+            break
+    city = " ".join(city_tokens) if city_tokens else args.strip()
+    start_date = dates[0] if dates else None
+    end_date   = dates[1] if len(dates) > 1 else None
+
+    # Embed date context in the query — htichips only accepts keywords, not specific dates
+    query = f"events in {city}"
+    if start_date and end_date:
+        s = datetime.strptime(start_date, "%Y-%m-%d")
+        e = datetime.strptime(end_date, "%Y-%m-%d")
+        if s.month == e.month and s.year == e.year:
+            query += f" {s.strftime('%B')} {s.day}-{e.day} {s.year}"
+        else:
+            query += f" {s.strftime('%B %d')} to {e.strftime('%B %d %Y')}"
+    elif start_date:
+        s = datetime.strptime(start_date, "%Y-%m-%d")
+        query += f" {s.strftime('%B %d %Y')}"
 
     try:
-        params = {
+        data = _search({
             "engine": "google_events",
-            "q": f"events in {city}",
+            "q": query,
             "hl": "en",
-            "gl": "us",
-        }
-        if date_filter:
-            params["htichips"] = f"date:{date_filter}"
-
-        data = _search(params)
+        })
         if "error" in data:
             return f"⚠️ Events search error: {data['error']}"
 
         events = data.get("events_results", [])
         if not events:
-            return f"No upcoming events found in {city.title()}."
+            return f"No upcoming events found in {city}."
 
-        lines = [f"🎭 *Events in {city.title()}*:\n"]
+        lines = [f"🎭 *Events in {city}*:\n"]
         for i, e in enumerate(events[:5], 1):
-            title = e.get("title", "Unknown Event")
-            date = e.get("date", {})
-            date_str = date.get("when", "")
-            venue_info = e.get("venue", {})
-            venue = venue_info.get("name", "")
-            address = venue_info.get("address", "")
+            title       = e.get("title", "Unknown Event")
+            date_str    = e.get("date", {}).get("when", "")
+            venue       = e.get("venue", {}).get("name", "")
+            address     = e.get("venue", {}).get("address", "")
             description = e.get("description", "")[:120]
+            link        = e.get("link", "")
 
-            venue_str = f"\n   📍 {venue}" if venue else ""
-            addr_str = f"\n   🗺 {address}" if address and not venue else ""
-            date_display = f"\n   🗓 {date_str}" if date_str else ""
-            desc_str = f"\n   {description}..." if description else ""
+            title_display = f"[{title}]({link})" if link else f"*{title}*"
+            date_display  = f"\n   🗓 {date_str}" if date_str else ""
+            venue_str     = f"\n   📍 {venue}" if venue else ""
+            addr_str      = f"\n   🗺 {address}" if address and not venue else ""
+            desc_str      = f"\n   {description}..." if description else ""
 
-            lines.append(f"{i}. *{title}*{date_display}{venue_str}{addr_str}{desc_str}")
+            lines.append(f"{i}. {title_display}{date_display}{venue_str}{addr_str}{desc_str}")
 
         lines.append("\n_Events from Google. Verify details before attending._")
         return "\n".join(lines)
