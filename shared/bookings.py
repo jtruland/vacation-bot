@@ -202,8 +202,8 @@ def format_for_telegram(chat_id: str, trip_name: str) -> str:
         bid     = b["id"]
         icon    = BOOKING_ICONS.get(btype, "📌")
         title   = b.get("title", "Unnamed")
-        start   = b.get("start_date") or ""
-        end     = b.get("end_date") or ""
+        start   = (b.get("start_date") or "")[:10]
+        end     = (b.get("end_date") or "")[:10]
         details = b.get("details") or {}
 
         if not start:
@@ -227,7 +227,7 @@ def format_for_telegram(chat_id: str, trip_name: str) -> str:
             time_s = details.get("time", "")
             label = f"{icon} {title}" + (f", {time_s}" if time_s else "")
 
-        events.append((start, start + "a", f"{label}   `{bid}`"))
+        events.append((start, start + "a", f"{label}   ({bid})"))
 
         # Secondary event (check-out / return / arrival)
         if end and end != start:

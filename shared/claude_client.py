@@ -230,8 +230,8 @@ TOOLS = [
                     "type": "string",
                     "description": "Short descriptive title, e.g. 'Delta JFK→FCO', 'Hotel de Russie Rome'"
                 },
-                "start_date": {"type": "string", "description": "YYYY-MM-DD or YYYY-MM-DDTHH:MM"},
-                "end_date":   {"type": "string", "description": "Return/check-out/end date"},
+                "start_date": {"type": "string", "description": "Start date (YYYY-MM-DD only, no time component)"},
+                "end_date":   {"type": "string", "description": "Return/check-out/end date (YYYY-MM-DD only)"},
                 "confirmation": {"type": "string", "description": "Booking/record locator code"},
                 "cost":       {"type": "number"},
                 "currency":   {"type": "string", "description": "Currency code, default USD"},
