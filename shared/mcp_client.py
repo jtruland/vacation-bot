@@ -128,4 +128,6 @@ def call_tool(tool_name: str, arguments: dict) -> str:
         raise RuntimeError(f"MCP tool error ({tool_name}): {err.get('message', err)}")
 
     content = payload.get("result", {}).get("content", [])
+    from shared.api_usage import record_mcp
+    record_mcp()
     return "\n".join(item["text"] for item in content if item.get("type") == "text")

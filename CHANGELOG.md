@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased] — 2026-05-09 (build 5)
+
+### Added
+
+**API usage stats (`!claude admin usage`)**
+- New owner-DM command showing live SerpApi quota (via `serpapi.com/account.json`) and locally-tracked Anthropic token/call counts and MCP call counts.
+- New module `shared/api_usage.py`: `record_anthropic()`, `record_mcp()`, `query_serpapi()`, `format_usage_report()`. Monthly counters reset automatically when the calendar month rolls; all-time `total_calls` accumulates indefinitely. Stats stored in `data/api_usage.json`.
+- `shared/claude_client.py`: `record_anthropic()` called after both `messages.create` sites (summarization + agentic loop).
+- `shared/mcp_client.py`: `record_mcp()` called after each successful tool result.
+- `telegram/bot.py`: `admin usage` case added to `_handle_dm` admin block; also added to admin help text.
+
 ## [Unreleased] — 2026-05-09 (build 4)
 
 ### Added

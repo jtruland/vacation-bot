@@ -326,13 +326,20 @@ async def _handle_dm(message, context, body: str, lower: str, dm_chat_id: str, s
                 await message.reply_text("Usage: `!claude admin rehome <old_id> <new_id>`", parse_mode="Markdown")
             return
 
+        if args_lower == "usage":
+            from shared.api_usage import format_usage_report
+            report = format_usage_report()
+            await message.reply_text(report, parse_mode="Markdown")
+            return
+
         await message.reply_text(
             "Admin commands:\n"
             "`!claude admin list`\n"
             "`!claude admin allow <chat_id>`\n"
             "`!claude admin deny <chat_id>`\n"
             "`!claude admin revoke <chat_id>`\n"
-            "`!claude admin rehome <old_id> <new_id>`",
+            "`!claude admin rehome <old_id> <new_id>`\n"
+            "`!claude admin usage`",
             parse_mode="Markdown"
         )
         return

@@ -601,6 +601,8 @@ def _generate_and_save_summary(chat_id: str, trip_name: str) -> None:
             system=SUMMARIZE_PROMPT,
             messages=history
         )
+        from shared.api_usage import record_anthropic
+        record_anthropic(response.usage.input_tokens, response.usage.output_tokens)
         _append_summary(chat_id, trip_name, response.content[0].text.strip())
     except Exception:
         logger.exception("Failed to save summary for %s/%s — history will still be trimmed", chat_id, trip_name)
@@ -682,6 +684,8 @@ def ask_claude(message: str, chat_id: str, trip_name: str) -> tuple[str, list[st
                 tools=TOOLS,
                 messages=history
             )
+            from shared.api_usage import record_anthropic
+            record_anthropic(response.usage.input_tokens, response.usage.output_tokens)
 
             # Claude is done — return the final text response
             if response.stop_reason == "end_turn":
