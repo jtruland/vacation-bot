@@ -434,6 +434,10 @@ async def _handle_dm(message, context, body: str, lower: str, dm_chat_id: str, s
         return
 
     # ── DM join/link commands ────────────────────────────────────────────────────
+    if lower == "whoami":
+        await message.reply_text(f"Your Telegram user ID is `{sender_id}`.", parse_mode="Markdown")
+        return
+
     if lower.startswith("join "):
         code = body[len("join "):].strip()
         group_id = get_group_for_code(code)
