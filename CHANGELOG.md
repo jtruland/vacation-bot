@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased] — 2026-05-10 (build 7)
+
+### Added
+
+**Owner DM auth commands (`telegram/bot.py`)**
+- `!claude dm auth <telegram_user_id>` — owner-only command that grants another user DM access to the owner's DM-only trips. Uses the existing `link_dm_to_group` mechanism with the owner's chat_id as the "group", so the authorized user's DM routes to the owner's data directory with no other changes needed.
+- `!claude dm deauth <telegram_user_id>` — revokes that access.
+- Inserted before the general DM join/link block in `_handle_dm` dispatch order.
+- Added to `HELP_TEXT` under a new "DM access (owner only)" section.
+
 ## [Unreleased] — 2026-05-10 (build 6)
 
 ### Changed

@@ -188,6 +188,9 @@ HELP_TEXT = (
     "  `!claude book skip` — discard without saving\n"
     "  _Scans also run automatically at 8am daily_\n\n"
     "  `!claude help` — show this message\n\n"
+    "*DM access (owner only):*\n"
+    "  `!claude dm auth <user_id>` — grant a user access to your DM trips\n"
+    "  `!claude dm deauth <user_id>` — revoke DM trip access\n\n"
     "_Paste any travel link and Claude will read it._\n"
     "_Dates: YYYY-MM-DD or MM/DD/YYYY. Prices in USD._"
 )
@@ -407,6 +410,27 @@ async def _handle_dm(message, context, body: str, lower: str, dm_chat_id: str, s
             f"Usage: `!claude {cmd} <group name> #<trip> [all|1 3]`",
             parse_mode="Markdown"
         )
+        return
+
+    # ── Owner DM auth commands ───────────────────────────────────────────────────
+    if is_owner and lower.startswith("dm auth "):
+        user_id = body[len("dm auth "):].strip()
+        if not user_id.lstrip("-").isdigit():
+            await message.reply_text("Usage: `!claude dm auth <telegram_user_id>`", parse_mode="Markdown")
+            return
+        link_dm_to_group(user_id, dm_chat_id)
+        await message.reply_text(f"✅ User `{user_id}` can now access your DM trips.", parse_mode="Markdown")
+        return
+
+    if is_owner and lower.startswith("dm deauth "):
+        user_id = body[len("dm deauth "):].strip()
+        if not user_id.lstrip("-").isdigit():
+            await message.reply_text("Usage: `!claude dm deauth <telegram_user_id>`", parse_mode="Markdown")
+            return
+        if unlink_dm_from_group(user_id, dm_chat_id):
+            await message.reply_text(f"✅ User `{user_id}` can no longer access your DM trips.", parse_mode="Markdown")
+        else:
+            await message.reply_text(f"❌ User `{user_id}` is not linked to your DM trips.", parse_mode="Markdown")
         return
 
     # ── DM join/link commands ────────────────────────────────────────────────────
