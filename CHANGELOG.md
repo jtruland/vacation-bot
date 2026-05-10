@@ -1,5 +1,22 @@
 # Changelog
 
+## [Unreleased] — 2026-05-10 (build 6)
+
+### Changed
+
+**MCP client rewritten for FastMCP 3.x streamable HTTP (`shared/mcp_client.py`)**
+- FastMCP 3.x dropped the legacy `/sse` GET endpoint; rewrote client to use streamable HTTP (`POST /mcp`).
+- Session flow: POST initialize with `stream=True` (background thread keeps connection open to hold session alive) → extract `mcp-session-id` from response header → POST `notifications/initialized` → POST `tools/call` → read SSE result from the tool call POST response body → signal init thread to close.
+- Key discovery: FastMCP sessions are tied to the initialize connection lifetime; closing it immediately destroys the session (causes 404 on all subsequent requests). Tool call results arrive as SSE in the tool call POST response, not on the init stream.
+- Removed `threading`/`queue` SSE reader pattern; replaced with simpler persistent-stream approach.
+
+### Fixed
+
+**Bearer token auth now working end-to-end**
+- Gateway `StaticTokenVerifier` required `"openid"` in scopes (GoogleProvider defaults `required_scopes=["openid"]`; empty scopes caused 403 `insufficient_scope`). Fixed on the gateway side.
+- `MCP_API_KEY` set in Portainer stack env and in `.env` on the Mac Mini.
+- `search_gas_nearby` and `search_gas_along_route` tested working in Telegram.
+
 ## [Unreleased] — 2026-05-09 (build 5)
 
 ### Added
