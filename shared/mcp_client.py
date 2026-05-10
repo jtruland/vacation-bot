@@ -2,10 +2,18 @@
 Lightweight MCP (Model Context Protocol) client for mcp.bitz.dev.
 Transport: Streamable HTTP (MCP protocol 2024-11-05, FastMCP 3.x).
 Auth: API key via Authorization: Bearer header.
+
+Session flow:
+  - POST /mcp (initialize, stream=True) — keeps connection open to hold session alive
+  - GET session ID from response headers
+  - POST /mcp (notifications/initialized) with session ID
+  - POST /mcp (tools/call) with session ID — result returned as SSE in POST response
+  - Init stream closed after tool result is received
 """
 import json
 import logging
 import os
+import threading
 
 import requests
 from dotenv import load_dotenv
@@ -29,8 +37,9 @@ def call_tool(tool_name: str, arguments: dict) -> str:
     """
     Call a tool on the MCP gateway and return its text output.
 
-    Uses streamable HTTP transport: POST to /mcp for every step.
-    Each call is independent (no persistent session).
+    Opens a streaming initialize POST to establish a session, makes the
+    tool call on a separate POST (response arrives as SSE in that POST),
+    then closes the init stream.
     """
     api_key = _get_api_key()
     headers = {
@@ -39,38 +48,63 @@ def call_tool(tool_name: str, arguments: dict) -> str:
         "Accept": "application/json, text/event-stream",
     }
 
-    # Initialize — get session ID from response header
-    resp = requests.post(_MCP_URL, json={
-        "jsonrpc": "2.0", "id": 1, "method": "initialize",
-        "params": {
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": {"name": "vacation-bot", "version": "1.0"},
-        },
-    }, headers=headers, timeout=15)
-    resp.raise_for_status()
+    session_id_holder: list[str | None] = [None]
+    session_ready = threading.Event()
+    session_done = threading.Event()
+    init_error: list[Exception | None] = [None]
 
-    session_id = resp.headers.get("mcp-session-id")
-    if session_id:
-        headers["mcp-session-id"] = session_id
+    def _init_stream() -> None:
+        try:
+            with requests.post(
+                _MCP_URL,
+                json={
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "clientInfo": {"name": "vacation-bot", "version": "1.0"},
+                    },
+                },
+                headers=headers,
+                timeout=120,
+                stream=True,
+            ) as resp:
+                resp.raise_for_status()
+                session_id_holder[0] = resp.headers.get("mcp-session-id")
+                session_ready.set()
+                session_done.wait(timeout=90)
+        except Exception as exc:
+            init_error[0] = exc
+            session_ready.set()
 
-    # Initialized notification
-    requests.post(_MCP_URL, json={
-        "jsonrpc": "2.0", "method": "notifications/initialized",
-    }, headers=headers, timeout=10)
+    t = threading.Thread(target=_init_stream, daemon=True)
+    t.start()
 
-    # Tool call — may return JSON or SSE stream
-    resp = requests.post(_MCP_URL, json={
-        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-        "params": {"name": tool_name, "arguments": arguments},
-    }, headers=headers, timeout=60, stream=True)
-    resp.raise_for_status()
+    if not session_ready.wait(timeout=15):
+        raise RuntimeError(f"MCP gateway timeout: no session within 15s for {tool_name}")
 
-    content_type = resp.headers.get("Content-Type", "")
-    if "text/event-stream" in content_type:
+    if init_error[0]:
+        raise RuntimeError(f"MCP init failed: {init_error[0]}")
+
+    try:
+        session_id = session_id_holder[0]
+        post_headers = {**headers, "mcp-session-id": session_id}
+
+        # Initialized notification (202, no body needed)
+        requests.post(_MCP_URL, json={
+            "jsonrpc": "2.0", "method": "notifications/initialized",
+        }, headers=post_headers, timeout=10)
+
+        # Tool call — response is SSE stream in the POST response body
+        resp = requests.post(_MCP_URL, json={
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": tool_name, "arguments": arguments},
+        }, headers=post_headers, timeout=60, stream=True)
+        resp.raise_for_status()
+
         result = _parse_sse_result(resp, tool_name)
-    else:
-        result = resp.json()
+    finally:
+        session_done.set()
 
     if "error" in result:
         err = result["error"]
