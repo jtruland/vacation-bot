@@ -12,8 +12,7 @@ import threading
 
 import rumps
 
-LOG_FILE  = os.path.join(os.path.dirname(__file__), '..', 'logs', 'telegram.log')
-LOG_LINES = 60
+LOG_FILE = os.path.join(os.path.dirname(__file__), '..', 'logs', 'telegram.log')
 
 log = logging.getLogger(__name__)
 
@@ -29,7 +28,7 @@ class VacationBotTray(rumps.App):
         self._btn_stop    = rumps.MenuItem("■  Stop Bot",        callback=self._on_stop)
         self._btn_reload      = rumps.MenuItem("↺  Reload",          callback=self._on_reload)
         self._btn_pull_reload = rumps.MenuItem("⬇︎  Pull & Reload",   callback=self._on_pull_reload)
-        self._btn_logs    = rumps.MenuItem("📋  View Logs",       callback=self._on_view_logs)
+        self._btn_logs    = rumps.MenuItem("📋  View Live Log",    callback=self._on_view_logs)
         self._btn_logfile = rumps.MenuItem("📂  Open Log File",   callback=self._on_open_log)
         self._btn_quit    = rumps.MenuItem("Quit",                callback=self._on_quit)
 
@@ -123,17 +122,10 @@ class VacationBotTray(rumps.App):
         if not os.path.exists(log_path):
             rumps.alert("No log file found yet — has the bot started?", ok="OK")
             return
-        try:
-            result = subprocess.run(
-                ["tail", "-n", str(LOG_LINES), log_path],
-                capture_output=True, text=True, timeout=5,
-            )
-            text = result.stdout or "(log file is empty)"
-        except Exception as e:
-            text = f"Could not read log: {e}"
-        if len(text) > 3500:
-            text = "…(earlier lines omitted)\n\n" + text[-3500:]
-        rumps.alert(title=f"Bot Logs (last {LOG_LINES} lines)", message=text, ok="Close")
+        subprocess.Popen([
+            "osascript", "-e",
+            f"tell application \"Terminal\" to do script \"tail -f '{log_path}'\"",
+        ])
 
     def _on_open_log(self, _) -> None:
         log_path = os.path.abspath(LOG_FILE)
