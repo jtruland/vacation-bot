@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from shared.claude_client import (
     ask_claude, clear_history, rehome_history, save_summarize_now, strip_trigger,
     parse_trip_selector, get_trips, get_default_trip, has_trips,
-    create_trip, set_default_trip, delete_trip
+    create_trip, set_default_trip, rename_trip, delete_trip
 )
 from shared.serpapi_client import (
     search_flights, search_hotels, search_rentals,
@@ -585,6 +585,20 @@ async def _process_group_message(message, context, body: str, lower: str, chat_i
             await message.reply_text(f"❌ {result}")
         return
 
+    if lower.startswith("trip rename "):
+        parts = body[len("trip rename "):].strip().split(None, 1)
+        if len(parts) != 2:
+            await message.reply_text("❌ Usage: `!claude trip rename <old-name> <new-name>`", parse_mode="Markdown")
+            return
+        success, result = rename_trip(chat_id, parts[0], parts[1])
+        if success:
+            await message.reply_text(f'✅ Trip renamed to "*{result}*".', parse_mode="Markdown")
+            if is_dm:
+                log_dm_activity(chat_id, result, f"Trip renamed to: {result}")
+        else:
+            await message.reply_text(f"❌ {result}")
+        return
+
     if lower.startswith("trip delete "):
         if not await is_admin(message, context):
             await message.reply_text("❌ Only group admins can delete trips.")
@@ -962,7 +976,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         body == ""
         or lower in instant_commands
         or any(lower.startswith(p) for p in (
-            "trip new ", "trip default ", "trip delete ",
+            "trip new ", "trip default ", "trip rename ", "trip delete ",
             "reset ", "summarize ", "booked ",
             "book save ", "book skip ", "book remove ", "book edit ",
             "flights ", "hotels ", "rentals ",

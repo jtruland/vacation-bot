@@ -524,6 +524,8 @@ def create_trip(chat_id: str, trip_name: str) -> tuple[bool, str]:
         return False, "Trip name must be 30 characters or fewer."
     if " " in trip_name:
         return False, "Trip name can't contain spaces. Try something like `italy2026` or `beach-trip`."
+    if "#" in trip_name:
+        return False, "Trip name can't contain `#` — that character is used for trip selectors in commands."
 
     config = _load_config(chat_id)
     if trip_name in config["trips"]:
@@ -545,6 +547,43 @@ def set_default_trip(chat_id: str, trip_name: str) -> tuple[bool, str]:
     config["default"] = trip_name
     _save_config(chat_id, config)
     return True, trip_name
+
+
+def rename_trip(chat_id: str, old_name: str, new_name: str) -> tuple[bool, str]:
+    """Rename a trip. Returns (success, new_name_or_error_message)."""
+    old_name = old_name.lower().strip()
+    new_name = new_name.lower().strip()
+
+    if not new_name:
+        return False, "New trip name can't be empty."
+    if len(new_name) > 30:
+        return False, "Trip name must be 30 characters or fewer."
+    if " " in new_name:
+        return False, "Trip name can't contain spaces. Try something like `italy2026` or `beach-trip`."
+    if "#" in new_name:
+        return False, "Trip name can't contain `#` — that character is used for trip selectors in commands."
+
+    config = _load_config(chat_id)
+    if old_name not in config["trips"]:
+        return False, f'No trip called "{old_name}" found. Use `!claude trips` to see available trips.'
+    if new_name in config["trips"]:
+        return False, f'A trip called "{new_name}" already exists.'
+
+    dir_path = chat_dir(chat_id)
+    for suffix in ("_bookings.json", "_summary.txt", "_pending.json"):
+        old_file = os.path.join(dir_path, old_name + suffix)
+        new_file = os.path.join(dir_path, new_name + suffix)
+        if os.path.exists(old_file):
+            os.rename(old_file, new_file)
+
+    config["trips"] = [new_name if t == old_name else t for t in config["trips"]]
+    if config.get("default") == old_name:
+        config["default"] = new_name
+    _save_config(chat_id, config)
+
+    clear_history(chat_id, old_name)
+    clear_history(chat_id, new_name)
+    return True, new_name
 
 
 def delete_trip(chat_id: str, trip_name: str) -> tuple[bool, str]:
@@ -667,6 +706,7 @@ def ask_claude(message: str, chat_id: str, trip_name: str) -> tuple[str, list[st
 
     collected_images: list[str] = []
     history = _histories[chat_id][trip_name]
+    history_start = len(history)
     history.append({"role": "user", "content": full_message})
 
     # Summarize and trim when window is full
@@ -674,6 +714,7 @@ def ask_claude(message: str, chat_id: str, trip_name: str) -> tuple[str, list[st
         _generate_and_save_summary(chat_id, trip_name)
         _histories[chat_id][trip_name] = history[-MAX_HISTORY:]
         history = _histories[chat_id][trip_name]
+        history_start = len(history) - 1  # user message is the last item after trim
 
     try:
         # Agentic loop — Claude may call tools multiple times before giving a final answer
@@ -731,27 +772,27 @@ def ask_claude(message: str, chat_id: str, trip_name: str) -> tuple[str, list[st
         return "⚠️ I got a bit stuck working through that. Could you try rephrasing your question?", []
 
     except anthropic.AuthenticationError:
-        history.pop()
+        del history[history_start:]
         raise RuntimeError("⚠️ Bot config error: invalid Anthropic API key. Ask Jon to check the setup.")
 
     except anthropic.PermissionDeniedError as e:
-        history.pop()
+        del history[history_start:]
         if "credit balance" in str(e).lower():
             raise RuntimeError("⚠️ Out of API credits. Ask Jon to top up at console.anthropic.com.")
         raise RuntimeError("⚠️ API access denied. Ask Jon to check the Anthropic account.")
 
     except anthropic.RateLimitError:
-        history.pop()
+        del history[history_start:]
         raise RuntimeError("⚠️ Too many requests right now. Wait a minute and try again.")
 
     except anthropic.APIStatusError as e:
-        history.pop()
+        del history[history_start:]
         if "credit balance" in str(e).lower():
             raise RuntimeError("⚠️ Out of API credits. Ask Jon to top up at console.anthropic.com.")
         raise RuntimeError(f"⚠️ API error ({e.status_code}). Try again in a moment.")
 
     except anthropic.APIConnectionError:
-        history.pop()
+        del history[history_start:]
         raise RuntimeError("⚠️ Couldn't reach the Anthropic API. Check the internet connection on the Mac Mini.")
 
 
