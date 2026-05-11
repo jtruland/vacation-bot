@@ -27,7 +27,8 @@ class VacationBotTray(rumps.App):
         self._lbl_status  = rumps.MenuItem("● Starting…")
         self._btn_start   = rumps.MenuItem("▶  Start Bot",      callback=self._on_start)
         self._btn_stop    = rumps.MenuItem("■  Stop Bot",        callback=self._on_stop)
-        self._btn_reload  = rumps.MenuItem("↺  Reload",          callback=self._on_reload)
+        self._btn_reload      = rumps.MenuItem("↺  Reload",          callback=self._on_reload)
+        self._btn_pull_reload = rumps.MenuItem("⬇︎  Pull & Reload",   callback=self._on_pull_reload)
         self._btn_logs    = rumps.MenuItem("📋  View Logs",       callback=self._on_view_logs)
         self._btn_logfile = rumps.MenuItem("📂  Open Log File",   callback=self._on_open_log)
         self._btn_quit    = rumps.MenuItem("Quit",                callback=self._on_quit)
@@ -38,6 +39,7 @@ class VacationBotTray(rumps.App):
             self._btn_start,
             self._btn_stop,
             self._btn_reload,
+            self._btn_pull_reload,
             None,
             self._btn_logs,
             self._btn_logfile,
@@ -82,6 +84,27 @@ class VacationBotTray(rumps.App):
         def _do() -> None:
             log.info("Reload requested — stopping bot then exiting for launchd restart")
             self._bot.stop()
+            os._exit(1)
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _on_pull_reload(self, _) -> None:
+        """Pull latest code from git, then restart via launchd."""
+        def _do() -> None:
+            log.info("Pull & Reload requested — stopping bot")
+            self._bot.stop()
+            project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+            log.info("Running git pull in %s", project_root)
+            result = subprocess.run(
+                ["git", "pull"],
+                cwd=project_root,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if result.returncode == 0:
+                log.info("git pull: %s", result.stdout.strip())
+            else:
+                log.error("git pull failed (exit %d): %s", result.returncode, result.stderr.strip())
             os._exit(1)
         threading.Thread(target=_do, daemon=True).start()
 
