@@ -527,8 +527,9 @@ async def _handle_dm(message, context, body: str, lower: str, dm_chat_id: str, s
         await message.reply_text(HELP_TEXT, parse_mode="Markdown")
         return
 
-    # Delegate to the main process_message logic using the group's chat_id
-    await _process_group_message(message, context, body, lower, group_chat_id, trip_name, is_dm=True)
+    # Strip the trip selector before dispatching so command handlers in
+    # _process_group_message see a clean body (e.g. "booked", not "#rome booked").
+    await _process_group_message(message, context, question, question.lower(), group_chat_id, trip_name, is_dm=True)
 
 
 async def _process_group_message(message, context, body: str, lower: str, chat_id: str, forced_trip: str | None, is_dm: bool = False) -> None:
