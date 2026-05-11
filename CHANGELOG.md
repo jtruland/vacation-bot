@@ -1,5 +1,38 @@
 # Changelog
 
+## [Unreleased] — 2026-05-10 (build 8)
+
+### Fixed
+
+**Persistent 400 errors from conversation history corruption (`shared/claude_client.py`)**
+- When Claude's agentic loop failed mid-flight (e.g. a tool_use message was appended to history and the subsequent API call returned 400), the `except` block called `history.pop()` — removing only the last item and leaving a dangling `assistant` message with `tool_use` blocks but no corresponding `tool_result`. Every subsequent call then returned 400 because Anthropic rejects conversations ending in an unresolved tool_use.
+- Fix: record `history_start = len(history)` before appending the user message; on any exception use `del history[history_start:]` to restore the conversation to its exact pre-request state regardless of how many intermediate messages were added.
+
+**DM routing: command handlers ignored when `#tripname` prefix was present (`telegram/bot.py`)**
+- `_handle_dm` extracted the trip selector from `body` but passed the full, un-stripped `body` to `_process_group_message`. All command handlers (`booked`, `reset`, `trip rename`, etc.) check `lower.startswith(...)` against the full body, so `!claude #xmasineurope2026 booked` was dispatched as `body="#xmasineurope2026 booked"` — no handler matched and it fell through to Claude.
+- Fix: pass `question` and `question.lower()` (the body with the selector stripped) to `_process_group_message` instead of `body`/`lower`.
+
+**Bot blocking entire event loop during Claude calls (`telegram/bot.py`)**
+- The Anthropic Python SDK is synchronous; `messages.create()` blocked the asyncio event loop for the full duration of Claude's agentic loop, freezing the bot for all other chats and messages.
+- Fix: wrap the `ask_claude` call with `asyncio.to_thread()` so the blocking work runs in a thread pool and the event loop stays free. Added `concurrent_updates(True)` to the Application builder so queued messages from other chats can be dispatched while Claude is running.
+
+### Added
+
+**`!claude trip rename <old> <new>` command (`shared/claude_client.py`, `telegram/bot.py`)**
+- New `rename_trip(chat_id, old_name, new_name)` function: validates the new name (same rules as create), renames `_bookings.json`, `_summary.txt`, and `_pending.json` on disk, updates `config.json` (trips list + default pointer), and clears in-memory history for both names.
+- Handler added to `_process_group_message` between `trip default` and `trip delete`; added to instant-commands prefix list.
+
+**`create_trip` rejects `#` in trip names (`shared/claude_client.py`)**
+- Previously a trip created as `#mytrip` would display as `##mytrip` in disambiguation lists (`#{t}` formatting) and break the trip selector (`parse_trip_selector` strips one `#`, leaving `#mytrip` as the name). Now returns a clear error: "Trip name can't contain `#`."
+
+**"Pull & Reload" tray menu item (`tray/tray.py`)**
+- New menu item between "Reload" and the separator. Runs `git pull origin main` (explicit remote/branch — local `main` has no upstream tracking set) in the project root after stopping the bot, then exits non-zero for launchd restart. Pull failure is non-fatal: logs the error and restarts on current code.
+- Existing "Reload" unchanged for restarting without pulling.
+
+**"View Live Log" replaces "View Logs" popup (`tray/tray.py`)**
+- Old `rumps.alert()` with 60 lines of `tail -n` output was frequently taller than the screen, hiding the Close button.
+- New: opens a Terminal window via AppleScript running `tail -f <log_path>`. Starts at the end of the file, auto-scrolls as entries arrive, never jumps.
+
 ## [Unreleased] — 2026-05-10 (build 7)
 
 ### Added
