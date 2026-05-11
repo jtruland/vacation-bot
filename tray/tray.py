@@ -95,7 +95,7 @@ class VacationBotTray(rumps.App):
             project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
             log.info("Running git pull in %s", project_root)
             result = subprocess.run(
-                ["git", "pull"],
+                ["git", "pull", "origin", "main"],
                 cwd=project_root,
                 capture_output=True,
                 text=True,
