@@ -924,7 +924,7 @@ async def _process_group_message(message, context, body: str, lower: str, chat_i
 
     await context.bot.send_chat_action(chat_id=message.chat_id, action="typing")
     try:
-        response, images = ask_claude(question, chat_id, trip_name)
+        response, images = await asyncio.to_thread(ask_claude, question, chat_id, trip_name)
         header = f"_{trip_name}_\n" if trip_selector and not forced_trip else ""
         await send_chunked(message, header + response)
         await offer_images(message, images)
@@ -1202,7 +1202,7 @@ class BotManager:
                     self._status = "stopped"
 
     async def _async_main(self, stop_event: asyncio.Event) -> None:
-        app = Application.builder().token(self._token).build()
+        app = Application.builder().token(self._token).concurrent_updates(True).build()
         _setup_handlers(app)
         async with app:
             await app.start()
